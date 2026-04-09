@@ -1,0 +1,245 @@
+import asyncio
+import logging
+import os
+import shutil
+import tempfile
+import traceback
+from pathlib import Path
+
+from . import fs, log, quarantine, sanitize
+from .clamav import scan_pngs
+from .converter import ConversionError, convert_to_pdf, rasterize_pdf
+
+_MAX_SIZE = 100 * 1024 * 1024  # 100 MB
+
+# (magic_bytes_prefix, format_string)
+_MAGIC: list[tuple[bytes, str]] = [
+    (b"%PDF", "pdf"),
+    (b"PK\x03\x04", "zip"),         # DOCX, XLSX, PPTX (ZIP-based Office)
+    (b"\xd0\xcf\x11\xe0", "ole"),   # DOC, XLS, PPT (OLE/CFB)
+    (b"\x89PNG\r\n\x1a\n", "png"),
+    (b"\xff\xd8\xff", "jpg"),
+    (b"II*\x00", "tiff"),
+    (b"MM\x00*", "tiff"),
+    (b"BM", "bmp"),
+    (b"GIF87a", "gif"),
+    (b"GIF89a", "gif"),
+]
+
+_ZIP_EXT_MAP = {".docx": "docx", ".pptx": "pptx", ".xlsx": "xlsx"}
+_OLE_EXT_MAP = {".doc": "doc", ".ppt": "ppt", ".xls": "xls"}
+_IMAGE_FORMATS = {"png", "jpg", "tiff", "bmp", "gif"}
+_OFFICE_FORMATS = {"pdf", "docx", "doc", "xlsx", "xls", "pptx", "ppt"}
+
+
+def detect_format(header: bytes, filename: str) -> str:
+    ext = Path(filename).suffix.lower()
+    for magic, fmt in _MAGIC:
+        if header[: len(magic)] == magic:
+            if fmt == "zip":
+                return _ZIP_EXT_MAP.get(ext, "docx")
+            if fmt == "ole":
+                return _OLE_EXT_MAP.get(ext, "doc")
+            return fmt
+    return "unknown"
+
+
+async def process_file(
+    rel_path: Path,
+    source_dir: Path,
+    clean_dir: Path,
+    quarantine_dir: Path,
+    socket_path: str,
+    logger: logging.Logger,
+    timeout: int = 60,
+    memory_limit_mb: int = 512,
+) -> bool:
+    """Process one file. Returns True if clean output written, False if quarantined."""
+    src = source_dir / rel_path
+    rel_str = str(rel_path)
+
+    # Pre-flight: size check before reading full file
+    try:
+        file_size = os.stat(src).st_size
+    except OSError as e:
+        await _quarantine(logger, rel_str, quarantine_dir, rel_path, "unknown",
+                          "UnexpectedError", str(e), traceback.format_exc(), 0, "")
+        return False
+
+    if file_size > _MAX_SIZE:
+        await _quarantine(logger, rel_str, quarantine_dir, rel_path, "unknown",
+                          "FileTooLarge", f"File size {file_size} exceeds {_MAX_SIZE} byte limit",
+                          None, file_size, "")
+        return False
+
+    # Read file and hash
+    raw = src.read_bytes()
+    file_sha256 = quarantine.sha256(raw)
+    log.debug(logger, rel_str, "READ", f"size={file_size}  sha256={file_sha256[:16]}…")
+
+    # Format detection from magic bytes
+    fmt = detect_format(raw[:16], rel_path.name)
+    log.start(logger, rel_str, fmt)
+
+    if fmt not in _IMAGE_FORMATS and fmt not in _OFFICE_FORMATS:
+        await _quarantine(logger, rel_str, quarantine_dir, rel_path, "unknown",
+                          "UnsupportedFormat", "Unrecognized magic bytes",
+                          None, file_size, file_sha256)
+        return False
+
+    scan_dir = Path(tempfile.mkdtemp(prefix="scrub_scan_"))
+    try:
+        if fmt in _IMAGE_FORMATS:
+            log.debug(logger, rel_str, "PROCESS", "path=image")
+            pages = await _process_image(raw, fmt, scan_dir)
+        else:
+            log.debug(logger, rel_str, "PROCESS", "path=document  step=libreoffice→pdf")
+            pages = await _process_document(raw, fmt, scan_dir, timeout, memory_limit_mb)
+
+        if isinstance(pages, ConversionError):
+            await _quarantine(logger, rel_str, quarantine_dir, rel_path, fmt,
+                              pages.error_type, pages.detail,
+                              None, file_size, file_sha256)
+            return False
+
+        log.debug(logger, rel_str, "PROCESS", f"step=rasterized  pages={len(pages)}")
+
+        # ClamAV scan — all pages before any write
+        scan_paths = [scan_dir / f"page_{i + 1:03d}.png" for i in range(len(pages))]
+        log.debug(logger, rel_str, "SCAN", f"pages={len(scan_paths)}")
+        result = await scan_pngs(scan_paths, socket_path)
+
+        if not result.clean:
+            if result.error:
+                log.debug(logger, rel_str, "SCAN", f"result=error  detail={result.error}")
+                await _quarantine(logger, rel_str, quarantine_dir, rel_path, fmt,
+                                  "ClamAVError", result.error,
+                                  None, file_size, file_sha256)
+            else:
+                log.debug(logger, rel_str, "SCAN", f"result=threat  virus={result.virus_name}  file={result.scanned_file}")
+                await _quarantine(logger, rel_str, quarantine_dir, rel_path, fmt,
+                                  "ClamAVDetection",
+                                  f"ClamAV detected threat in {result.scanned_file}",
+                                  None, file_size, file_sha256,
+                                  virus_name=result.virus_name,
+                                  scanned_file=result.scanned_file)
+            return False
+
+        log.debug(logger, rel_str, "SCAN", "result=clean")
+
+        # Write to clean dir
+        is_xlsx = fmt in ("xlsx", "xls")
+        out_paths = fs.derive_output_paths(source_dir, clean_dir, rel_path, len(pages), is_xlsx)
+        for out_path, png_data in zip(out_paths, pages):
+            log.debug(logger, rel_str, "WRITE", str(out_path))
+            await fs.write_png(out_path, png_data)
+
+        log.success(logger, rel_str, len(pages))
+        return True
+
+    except ConversionError as e:
+        await _quarantine(logger, rel_str, quarantine_dir, rel_path, fmt,
+                          e.error_type, e.detail, traceback.format_exc(), file_size, file_sha256)
+        return False
+    except Exception as e:
+        await _quarantine(logger, rel_str, quarantine_dir, rel_path, fmt,
+                          "UnexpectedError", str(e), traceback.format_exc(), file_size, file_sha256)
+        return False
+    finally:
+        shutil.rmtree(scan_dir, ignore_errors=True)
+
+
+async def _process_image(
+    raw: bytes, fmt: str, scan_dir: Path
+) -> list[bytes] | ConversionError:
+    loop = asyncio.get_running_loop()
+    tmp = Path(tempfile.mktemp(suffix=f".{fmt}"))
+    try:
+        tmp.write_bytes(raw)
+        try:
+            png_bytes = await loop.run_in_executor(None, sanitize.process_image_file, tmp)
+        except Exception as e:
+            return ConversionError("ImageDecodeError", f"Pillow failed: {e}")
+    finally:
+        tmp.unlink(missing_ok=True)
+
+    # Write to scan_dir for ClamAV
+    scan_path = scan_dir / "page_001.png"
+    try:
+        await loop.run_in_executor(None, scan_path.write_bytes, png_bytes)
+    except Exception as e:
+        return ConversionError("PillowEncodeError", f"PNG write failed: {e}")
+
+    return [png_bytes]
+
+
+async def _process_document(
+    raw: bytes, fmt: str, scan_dir: Path, timeout: int, memory_limit_mb: int
+) -> list[bytes] | ConversionError:
+    loop = asyncio.get_running_loop()
+    tmp_input = Path(tempfile.mktemp(suffix=f".{fmt}"))
+    pdf_path = None
+    try:
+        tmp_input.write_bytes(raw)
+
+        try:
+            pdf_path = await convert_to_pdf(tmp_input, fmt, timeout, memory_limit_mb)
+        except ConversionError:
+            raise
+        except Exception as e:
+            raise ConversionError("LibreOfficeError", str(e))
+
+        try:
+            pixel_pages = await loop.run_in_executor(None, rasterize_pdf, pdf_path)
+        except ConversionError:
+            raise
+        except Exception as e:
+            raise ConversionError("PyMuPDFError", str(e))
+
+        pages = []
+        for i, (rgb_bytes, w, h) in enumerate(pixel_pages):
+            try:
+                png_bytes = await loop.run_in_executor(
+                    None, sanitize.reencode_png, rgb_bytes, w, h
+                )
+            except Exception as e:
+                raise ConversionError("PillowEncodeError", f"page {i + 1} re-encode failed: {e}")
+
+            scan_path = scan_dir / f"page_{i + 1:03d}.png"
+            await loop.run_in_executor(None, scan_path.write_bytes, png_bytes)
+            pages.append(png_bytes)
+
+        return pages
+    finally:
+        tmp_input.unlink(missing_ok=True)
+        if pdf_path and pdf_path.exists():
+            pdf_path.unlink(missing_ok=True)
+
+
+async def _quarantine(
+    logger: logging.Logger,
+    rel_str: str,
+    quarantine_dir: Path,
+    rel_path: Path,
+    fmt: str,
+    error_type: str,
+    error_detail: str,
+    stack_trace: str | None,
+    file_size: int,
+    file_sha256: str,
+    virus_name: str | None = None,
+    scanned_file: str | None = None,
+) -> None:
+    manifest = quarantine.build_manifest(
+        input_path=rel_str,
+        format_detected=fmt,
+        error_type=error_type,
+        error_detail=error_detail,
+        stack_trace=stack_trace,
+        file_size_bytes=file_size,
+        file_sha256=file_sha256,
+        virus_name=virus_name,
+        scanned_file=scanned_file,
+    )
+    await fs.write_quarantine_manifest(quarantine_dir, rel_path, manifest)
+    log.quarantine(logger, rel_str, error_type, error_detail[:120])
