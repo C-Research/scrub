@@ -60,9 +60,10 @@ async def _run() -> int:
     clean_count = 0
     quarantine_count = 0
     error_count = 0
+    skipped_count = 0
 
     async def _bounded(rel_path: Path) -> None:
-        nonlocal clean_count, quarantine_count, error_count
+        nonlocal clean_count, quarantine_count, error_count, skipped_count
         async with sem:
             result = await process_file(
                 rel_path=rel_path,
@@ -77,6 +78,8 @@ async def _run() -> int:
                 clean_count += 1
             elif result == "quarantine":
                 quarantine_count += 1
+            elif result == "skipped":
+                skipped_count += 1
             else:
                 error_count += 1
 
@@ -91,7 +94,7 @@ async def _run() -> int:
 
     log.debug("[queue]", f"dispatching {len(tasks)} file(s) across {workers} worker(s)")
     await asyncio.gather(*tasks)
-    log.summary(total=len(tasks), clean=clean_count, quarantined=quarantine_count, errors=error_count)
+    log.summary(total=len(tasks), clean=clean_count, quarantined=quarantine_count, errors=error_count, skipped=skipped_count)
     return 1 if (quarantine_count or error_count) else 0
 
 

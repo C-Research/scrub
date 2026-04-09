@@ -275,13 +275,32 @@ class TestProcessFileImagePath:
         manifest = json.loads((tmp_path / "quarantine/suspect.png.json").read_text())
         assert manifest["error_type"] == "ClamAVError"
 
-    async def test_unsupported_format_goes_to_errors(self, tmp_path):
-        src = tmp_path / "source/mystery.bin"
+    async def test_unsupported_extension_skipped(self, tmp_path):
+        src = tmp_path / "source/movie.mp4"
         src.parent.mkdir(parents=True, exist_ok=True)
-        src.write_bytes(b"XXXXX not a real format XXXXX")
+        src.write_bytes(b"fake mp4 data")
 
         result = await process_file(
-            rel_path=Path("mystery.bin"),
+            rel_path=Path("movie.mp4"),
+            source_dir=tmp_path / "source",
+            clean_dir=tmp_path / "clean",
+            quarantine_dir=tmp_path / "quarantine",
+            errors_dir=tmp_path / "errors",
+            socket_path="/dev/null",
+        )
+
+        assert result == "skipped"
+        assert not list((tmp_path / "errors").rglob("*")) if (tmp_path / "errors").exists() else True
+
+    async def test_unsupported_magic_bytes_goes_to_errors(self, tmp_path, monkeypatch):
+        # Extension is supported (.pdf) but magic bytes are wrong → UnsupportedFormat error
+        src = tmp_path / "source/fake.pdf"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_bytes(b"XXXXX not a real pdf XXXXX")
+        monkeypatch.setattr("scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True)))
+
+        result = await process_file(
+            rel_path=Path("fake.pdf"),
             source_dir=tmp_path / "source",
             clean_dir=tmp_path / "clean",
             quarantine_dir=tmp_path / "quarantine",
@@ -290,7 +309,7 @@ class TestProcessFileImagePath:
         )
 
         assert result == "error"
-        manifest = json.loads((tmp_path / "errors/mystery.bin.json").read_text())
+        manifest = json.loads((tmp_path / "errors/fake.pdf.json").read_text())
         assert manifest["error_type"] == "UnsupportedFormat"
 
     async def test_file_too_large_goes_to_errors(self, tmp_path, monkeypatch):

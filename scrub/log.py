@@ -44,11 +44,15 @@ def error(input_path: str, error_type: str, detail: str = "") -> None:
     logger.warning(f"{input_path} ERROR error_type={error_type} {detail}".rstrip())
 
 
+def skip(input_path: str, ext: str) -> None:
+    logger.info(f"{input_path} SKIPPED ext={ext or '(none)'}")
+
+
 def fatal(msg: str) -> None:
     logger.error(msg)
 
 
-def summary(total: int, clean: int, quarantined: int, errors: int) -> None:
+def summary(total: int, clean: int, quarantined: int, errors: int, skipped: int) -> None:
     logger.info(
-        f"[done] total={total}  clean={clean}  quarantined={quarantined}  errors={errors}"
+        f"[done] total={total}  clean={clean}  quarantined={quarantined}  errors={errors}  skipped={skipped}"
     )

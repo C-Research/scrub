@@ -30,6 +30,16 @@ _OLE_EXT_MAP = {".doc": "doc", ".ppt": "ppt", ".xls": "xls"}
 _IMAGE_FORMATS = {"png", "jpg", "tiff", "bmp", "gif"}
 _OFFICE_FORMATS = {"pdf", "docx", "doc", "xlsx", "xls", "pptx", "ppt"}
 
+_SUPPORTED_EXTENSIONS = {
+    ".pdf",
+    ".docx", ".doc",
+    ".xlsx", ".xls",
+    ".pptx", ".ppt",
+    ".png", ".jpg", ".jpeg",
+    ".tiff", ".tif",
+    ".bmp", ".gif",
+}
+
 
 def detect_format(header: bytes, filename: str) -> str:
     ext = Path(filename).suffix.lower()
@@ -55,6 +65,12 @@ async def process_file(
     """Process one file. Returns 'clean', 'quarantine', or 'error'."""
     src = source_dir / rel_path
     rel_str = str(rel_path)
+
+    # Skip unsupported extensions before any file I/O
+    ext = rel_path.suffix.lower()
+    if ext not in _SUPPORTED_EXTENSIONS:
+        log.skip(rel_str, ext)
+        return "skipped"
 
     # Pre-flight: size check before reading full file
     try:
