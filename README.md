@@ -1,14 +1,18 @@
 # scrub
 
-CDR (Content Disarm and Reconstruction) tool. Converts office documents and images to sanitized PNGs by re-encoding through a pixel-level pipeline. Every input is assumed adversarially crafted.
+CDR (Content Disarm and Reconstruction) tool. Converts PDF, office documents and images to sanitized PNGs by re-encoding through a pixel-level pipeline. Every input is assumed adversarially crafted. Applies some TLC to your infected files telling malware:
 
-**Supported formats:** PDF, DOCX, DOC, XLSX, XLS, PPTX, PPT, PNG, JPG, TIFF, BMP, GIF
+So no, I don't want your number
+No, I don't want to give you mine and
+No, I don't want to meet you nowhere
+No, I don't want none of your time
 
-**Pipeline:** file → magic-byte detection → LibreOffice → PDF → PyMuPDF → raw pixels → Pillow re-encode → ClamAV scan → clean PNG
+**Supported formats:** PDF, DOCX, DOC, XLSX, XLS, PPTX, PPT, PNG, JPG, TIFF, BMP, GIF, ZIP, RAR
+
+**Pipeline:** archives expanded → file → magic-byte detection → LibreOffice → PDF → PyMuPDF → raw pixels → Pillow re-encode → ClamAV scan → clean PNG
 
 ## Requirements
 
-- Ubuntu (amd64)
 - Docker Engine (from apt, not Snap)
 - gVisor (`runsc`) — provides kernel-level sandbox isolation
 
@@ -56,6 +60,8 @@ sudo systemctl restart docker
 
 ### 3. Enable KVM (recommended)
 
+If on bare metal.
+
 `runsc-kvm` uses hardware virtualisation instead of ptrace for syscall interception — significantly faster for CPU-heavy workloads like LibreOffice. Check whether your machine supports it:
 
 ```bash
@@ -96,7 +102,7 @@ ClamAV signature download happens at first run, not at build time.
 mkdir -p data/source data/clean data/quarantine data/logs
 ```
 
-Place input files in `data/source/`. Subdirectory structure is preserved in output.
+Place input files in `data/source/`. Subdirectory structure is preserved in output. ZIP and RAR archives are automatically expanded before processing — members are extracted alongside the archive in the source directory.
 
 ### Start
 
@@ -112,11 +118,17 @@ On first run, the ClamAV sidecar downloads virus signatures (~300 MB) before `sc
 
 | Directory | Contents |
 |---|---|
-| `data/clean/` | Sanitized PNGs, folder structure mirrored from source |
+| `data/clean/` | Sanitized PNGs, subdirectory structure mirrored from source |
 | `data/quarantine/` | JSON manifests for rejected files |
 | `data/logs/` | Structured log file (`scrub.log`) |
 
-Each input file produces one PNG per page (documents) or one PNG (images), named `page_001.png`, `page_002.png`, etc. XLSX sheets produce `sheet_001.png`, `sheet_002.png`, etc.
+Each input file produces one PNG per page (documents) or one PNG (images). Output filenames embed the original filename:
+
+- `report.pdf` → `report.pdf.page_001.png`, `report.pdf.page_002.png`, …
+- `budget.xlsx` → `budget.xlsx.sheet_001.png`, `budget.xlsx.sheet_002.png`, …
+- `photo.png` → `photo.png.page_001.png`
+
+Files with existing clean output are skipped on re-runs — only new or previously unprocessed files are cleaned.
 
 ### Quarantine manifests
 
@@ -141,7 +153,7 @@ Files that cannot be safely converted are quarantined — never written to the c
 | Value | Meaning |
 |---|---|
 | `UnsupportedFormat` | Magic bytes don't match any supported format |
-| `FileTooLarge` | Input exceeds 100 MB |
+| `FileTooLarge` | Input exceeds `SCRUB_MAX_FILE_SIZE` (default 100 MB) |
 | `LibreOfficeTimeout` | LibreOffice exceeded timeout (default 60s) |
 | `LibreOfficeError` | LibreOffice non-zero exit |
 | `PyMuPDFError` | PDF rasterisation failed |
@@ -159,6 +171,9 @@ Environment variables (set in shell before `docker compose up`, or edit `docker-
 |---|---|---|
 | `SCRUB_WORKERS` | `ncpu*2-1` | Concurrent file workers |
 | `SCRUB_TIMEOUT` | `60` | Per-file LibreOffice timeout (seconds) |
+| `SCRUB_MAX_FILE_SIZE` | `100` | Per-file size limit (MB) |
+| `SCRUB_MAX_ARCHIVE_MEMBERS` | `1000` | Max members extracted per archive |
+| `SCRUB_MAX_ARCHIVE_TOTAL_MB` | `500` | Max total uncompressed size per archive (MB) |
 
 ```bash
 SCRUB_WORKERS=4 SCRUB_TIMEOUT=120 docker compose up
@@ -189,7 +204,9 @@ docker inspect scrub-scrub-1 --format '{{.HostConfig.Runtime}}'
 │  scrub  [runtime: runsc-kvm]                    │
 │  network_mode: none  |  read_only  |  cap_drop  │
 │                                                  │
-│  cli.py → pipeline.py                           │
+│  cli.py → archive.py (expand .zip/.rar)         │
+│        → pipeline.py (per file)                 │
+│    ├── already-clean check (skip if exists)     │
 │    ├── LibreOffice (subprocess, per file)        │
 │    ├── PyMuPDF (rasterise PDF)                  │
 │    ├── Pillow (pixel re-encode → PNG)           │
