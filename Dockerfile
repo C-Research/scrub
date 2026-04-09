@@ -13,6 +13,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     fonts-dejavu-core \
     fonts-noto-core \
+    # Java runtime — required by LibreOffice Calc for XLSX/XLS processing
+    default-jre-headless \
+    libreoffice-java-common \
     # clamav-daemon provides the clamdscan client binary; daemon runs in the sidecar
     clamav-daemon \
     clamdscan \
@@ -20,10 +23,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Minimal client config so clamdscan knows where to find the clamd socket
 RUN printf 'LocalSocket /run/clamav/clamd.sock\n' > /etc/clamav/clamd.conf
-
-# Disable LibreOffice Java integration system-wide
-RUN mkdir -p /etc/libreoffice && \
-    printf '[Bootstrap]\nJavaenabled=0\n' >> /etc/libreoffice/sofficerc
 
 # Create non-root user
 RUN groupadd --gid 1000 scrub && \
