@@ -1,6 +1,7 @@
 FROM python:3.11-slim-bookworm
 
-ENV DEBIAN_FRONTEND=noninteractive
+ENV DEBIAN_FRONTEND=noninteractive \
+    HOME=/tmp
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     # LibreOffice — only the three components we use (skip Base, Draw, Math)
@@ -13,7 +14,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     fonts-dejavu-core \
     fonts-noto-core \
-    # Java runtime — required by LibreOffice Calc for XLSX/XLS processing
+    # Java runtime — required by LibreOffice for XLSX/XLS processing
     default-jre-headless \
     libreoffice-java-common \
     # clamav-daemon provides the clamdscan client binary; daemon runs in the sidecar

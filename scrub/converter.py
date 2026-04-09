@@ -1,5 +1,4 @@
 import asyncio
-import resource
 import shutil
 import tempfile
 from pathlib import Path
@@ -54,7 +53,6 @@ async def convert_to_pdf(
     input_path: Path,
     fmt: str,
     timeout: int = 60,
-    memory_limit_mb: int = 512,
 ) -> Path:
     """Convert office document to PDF via LibreOffice. Returns path to temp PDF; caller deletes it."""
     profile_dir = Path(tempfile.mkdtemp(prefix="lo_profile_"))
@@ -63,16 +61,10 @@ async def convert_to_pdf(
     try:
         _setup_lo_profile(profile_dir)
 
-        limit_bytes = memory_limit_mb * 1024 * 1024
-
-        def _preexec():
-            resource.setrlimit(resource.RLIMIT_AS, (limit_bytes, limit_bytes))
-
         proc = await asyncio.create_subprocess_exec(
             *_lo_cmd(input_path, fmt, profile_dir, out_dir),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            preexec_fn=_preexec,
         )
 
         try:

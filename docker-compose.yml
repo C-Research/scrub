@@ -42,10 +42,14 @@ services:
       - type: bind
         source: ${SCRUB_CLEAN:-./data/clean}
         target: /data/clean
-      # Quarantine manifests
+      # Quarantine manifests (ClamAV detections only)
       - type: bind
         source: ${SCRUB_QUARANTINE:-./data/quarantine}
         target: /data/quarantine
+      # Error manifests (processing failures)
+      - type: bind
+        source: ${SCRUB_ERRORS:-./data/errors}
+        target: /data/errors
       # Logs
       - type: bind
         source: ${SCRUB_LOGS:-./data/logs}

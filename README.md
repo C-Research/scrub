@@ -159,7 +159,6 @@ Environment variables (set in shell before `docker compose up`, or edit `docker-
 |---|---|---|
 | `SCRUB_WORKERS` | `ncpu*2-1` | Concurrent file workers |
 | `SCRUB_TIMEOUT` | `60` | Per-file LibreOffice timeout (seconds) |
-| `SCRUB_MEMORY_LIMIT` | `512` | LibreOffice memory limit per subprocess (MB) |
 
 ```bash
 SCRUB_WORKERS=4 SCRUB_TIMEOUT=120 docker compose up

@@ -1,5 +1,4 @@
 import asyncio
-import logging
 import os
 import shutil
 import tempfile
@@ -49,12 +48,11 @@ async def process_file(
     source_dir: Path,
     clean_dir: Path,
     quarantine_dir: Path,
+    errors_dir: Path,
     socket_path: str,
-    logger: logging.Logger,
     timeout: int = 60,
-    memory_limit_mb: int = 512,
-) -> bool:
-    """Process one file. Returns True if clean output written, False if quarantined."""
+) -> str:
+    """Process one file. Returns 'clean', 'quarantine', or 'error'."""
     src = source_dir / rel_path
     rel_str = str(rel_path)
 
@@ -62,89 +60,89 @@ async def process_file(
     try:
         file_size = os.stat(src).st_size
     except OSError as e:
-        await _quarantine(logger, rel_str, quarantine_dir, rel_path, "unknown",
-                          "UnexpectedError", str(e), traceback.format_exc(), 0, "")
-        return False
+        await _error(rel_str, errors_dir, rel_path, "unknown",
+                     "UnexpectedError", str(e), traceback.format_exc(), 0, "")
+        return "error"
 
     if file_size > _MAX_SIZE:
-        await _quarantine(logger, rel_str, quarantine_dir, rel_path, "unknown",
-                          "FileTooLarge", f"File size {file_size} exceeds {_MAX_SIZE} byte limit",
-                          None, file_size, "")
-        return False
+        await _error(rel_str, errors_dir, rel_path, "unknown",
+                     "FileTooLarge", f"File size {file_size} exceeds {_MAX_SIZE} byte limit",
+                     None, file_size, "")
+        return "error"
 
     # Read file and hash
     raw = src.read_bytes()
     file_sha256 = quarantine.sha256(raw)
-    log.debug(logger, rel_str, "READ", f"size={file_size}  sha256={file_sha256[:16]}…")
+    log.debug(rel_str, "READ", f"size={file_size}  sha256={file_sha256[:16]}…")
 
     # Format detection from magic bytes
     fmt = detect_format(raw[:16], rel_path.name)
-    log.start(logger, rel_str, fmt)
+    log.start(rel_str, fmt)
 
     if fmt not in _IMAGE_FORMATS and fmt not in _OFFICE_FORMATS:
-        await _quarantine(logger, rel_str, quarantine_dir, rel_path, "unknown",
-                          "UnsupportedFormat", "Unrecognized magic bytes",
-                          None, file_size, file_sha256)
-        return False
+        await _error(rel_str, errors_dir, rel_path, "unknown",
+                     "UnsupportedFormat", "Unrecognized magic bytes",
+                     None, file_size, file_sha256)
+        return "error"
 
     scan_dir = Path(tempfile.mkdtemp(prefix="scrub_scan_"))
     try:
         if fmt in _IMAGE_FORMATS:
-            log.debug(logger, rel_str, "PROCESS", "path=image")
+            log.debug(rel_str, "PROCESS", "path=image")
             pages = await _process_image(raw, fmt, scan_dir)
         else:
-            log.debug(logger, rel_str, "PROCESS", "path=document  step=libreoffice→pdf")
-            pages = await _process_document(raw, fmt, scan_dir, timeout, memory_limit_mb)
+            log.debug(rel_str, "PROCESS", "path=document  step=libreoffice→pdf")
+            pages = await _process_document(raw, fmt, scan_dir, timeout)
 
         if isinstance(pages, ConversionError):
-            await _quarantine(logger, rel_str, quarantine_dir, rel_path, fmt,
-                              pages.error_type, pages.detail,
-                              None, file_size, file_sha256)
-            return False
+            await _error(rel_str, errors_dir, rel_path, fmt,
+                         pages.error_type, pages.detail,
+                         None, file_size, file_sha256)
+            return "error"
 
-        log.debug(logger, rel_str, "PROCESS", f"step=rasterized  pages={len(pages)}")
+        log.debug(rel_str, "PROCESS", f"step=rasterized  pages={len(pages)}")
 
         # ClamAV scan — all pages before any write
         scan_paths = [scan_dir / f"page_{i + 1:03d}.png" for i in range(len(pages))]
-        log.debug(logger, rel_str, "SCAN", f"pages={len(scan_paths)}")
+        log.debug(rel_str, "SCAN", f"pages={len(scan_paths)}")
         result = await scan_pngs(scan_paths, socket_path)
 
         if not result.clean:
             if result.error:
-                log.debug(logger, rel_str, "SCAN", f"result=error  detail={result.error}")
-                await _quarantine(logger, rel_str, quarantine_dir, rel_path, fmt,
+                log.debug(rel_str, "SCAN", f"result=error  detail={result.error}")
+                await _quarantine(rel_str, quarantine_dir, rel_path, fmt,
                                   "ClamAVError", result.error,
                                   None, file_size, file_sha256)
             else:
-                log.debug(logger, rel_str, "SCAN", f"result=threat  virus={result.virus_name}  file={result.scanned_file}")
-                await _quarantine(logger, rel_str, quarantine_dir, rel_path, fmt,
+                log.debug(rel_str, "SCAN", f"result=threat  virus={result.virus_name}  file={result.scanned_file}")
+                await _quarantine(rel_str, quarantine_dir, rel_path, fmt,
                                   "ClamAVDetection",
                                   f"ClamAV detected threat in {result.scanned_file}",
                                   None, file_size, file_sha256,
                                   virus_name=result.virus_name,
                                   scanned_file=result.scanned_file)
-            return False
+            return "quarantine"
 
-        log.debug(logger, rel_str, "SCAN", "result=clean")
+        log.debug(rel_str, "SCAN", "result=clean")
 
         # Write to clean dir
         is_xlsx = fmt in ("xlsx", "xls")
         out_paths = fs.derive_output_paths(source_dir, clean_dir, rel_path, len(pages), is_xlsx)
         for out_path, png_data in zip(out_paths, pages):
-            log.debug(logger, rel_str, "WRITE", str(out_path))
+            log.debug(rel_str, "WRITE", str(out_path))
             await fs.write_png(out_path, png_data)
 
-        log.success(logger, rel_str, len(pages))
-        return True
+        log.success(rel_str, len(pages))
+        return "clean"
 
     except ConversionError as e:
-        await _quarantine(logger, rel_str, quarantine_dir, rel_path, fmt,
-                          e.error_type, e.detail, traceback.format_exc(), file_size, file_sha256)
-        return False
+        await _error(rel_str, errors_dir, rel_path, fmt,
+                     e.error_type, e.detail, traceback.format_exc(), file_size, file_sha256)
+        return "error"
     except Exception as e:
-        await _quarantine(logger, rel_str, quarantine_dir, rel_path, fmt,
-                          "UnexpectedError", str(e), traceback.format_exc(), file_size, file_sha256)
-        return False
+        await _error(rel_str, errors_dir, rel_path, fmt,
+                     "UnexpectedError", str(e), traceback.format_exc(), file_size, file_sha256)
+        return "error"
     finally:
         shutil.rmtree(scan_dir, ignore_errors=True)
 
@@ -174,7 +172,7 @@ async def _process_image(
 
 
 async def _process_document(
-    raw: bytes, fmt: str, scan_dir: Path, timeout: int, memory_limit_mb: int
+    raw: bytes, fmt: str, scan_dir: Path, timeout: int
 ) -> list[bytes] | ConversionError:
     loop = asyncio.get_running_loop()
     tmp_input = Path(tempfile.mktemp(suffix=f".{fmt}"))
@@ -183,7 +181,7 @@ async def _process_document(
         tmp_input.write_bytes(raw)
 
         try:
-            pdf_path = await convert_to_pdf(tmp_input, fmt, timeout, memory_limit_mb)
+            pdf_path = await convert_to_pdf(tmp_input, fmt, timeout)
         except ConversionError:
             raise
         except Exception as e:
@@ -217,7 +215,6 @@ async def _process_document(
 
 
 async def _quarantine(
-    logger: logging.Logger,
     rel_str: str,
     quarantine_dir: Path,
     rel_path: Path,
@@ -242,4 +239,28 @@ async def _quarantine(
         scanned_file=scanned_file,
     )
     await fs.write_quarantine_manifest(quarantine_dir, rel_path, manifest)
-    log.quarantine(logger, rel_str, error_type, error_detail[:120])
+    log.quarantine(rel_str, error_type, error_detail[:120])
+
+
+async def _error(
+    rel_str: str,
+    errors_dir: Path,
+    rel_path: Path,
+    fmt: str,
+    error_type: str,
+    error_detail: str,
+    stack_trace: str | None,
+    file_size: int,
+    file_sha256: str,
+) -> None:
+    manifest = quarantine.build_manifest(
+        input_path=rel_str,
+        format_detected=fmt,
+        error_type=error_type,
+        error_detail=error_detail,
+        stack_trace=stack_trace,
+        file_size_bytes=file_size,
+        file_sha256=file_sha256,
+    )
+    await fs.write_error_manifest(errors_dir, rel_path, manifest)
+    log.error(rel_str, error_type, error_detail[:120])
