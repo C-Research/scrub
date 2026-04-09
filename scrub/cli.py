@@ -3,7 +3,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import clamav, fs, log
+from . import archive, clamav, fs, log
 from .pipeline import process_file
 
 # Fixed container-internal paths (match bind mount targets in docker-compose.yml)
@@ -29,6 +29,9 @@ def _optional_int(name: str, default: int) -> int:
 async def _run() -> int:
     workers = _optional_int("SCRUB_WORKERS", max(1, (os.cpu_count() or 1) * 2 - 1))
     timeout = _optional_int("SCRUB_TIMEOUT", 60)
+    max_file_bytes = _optional_int("SCRUB_MAX_FILE_SIZE", 100) * 1024 * 1024
+    max_archive_members = _optional_int("SCRUB_MAX_ARCHIVE_MEMBERS", 1000)
+    max_archive_total_bytes = _optional_int("SCRUB_MAX_ARCHIVE_TOTAL_MB", 500) * 1024 * 1024
 
     log.setup(_LOG)
     log.startup(
@@ -55,6 +58,12 @@ async def _run() -> int:
         log.fatal(str(e))
         return 1
     log.debug("[clamav]", "daemon ready")
+
+    expanded_count = await archive.expand_archives(
+        _SOURCE, max_file_bytes, max_archive_members, max_archive_total_bytes
+    )
+    if expanded_count:
+        log.debug("[archive]", f"expanded {expanded_count} archive(s)")
 
     sem = asyncio.Semaphore(workers)
     clean_count = 0
@@ -100,6 +109,7 @@ async def _run() -> int:
         quarantined=quarantine_count,
         errors=error_count,
         skipped=skipped_count,
+        expanded=expanded_count,
     )
     return 1 if (quarantine_count or error_count) else 0
 

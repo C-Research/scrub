@@ -20,6 +20,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # clamav-daemon provides the clamdscan client binary; daemon runs in the sidecar
     clamav-daemon \
     clamdscan \
+    # bsdtar (libarchive-tools) — used by the rarfile Python package for RAR extraction
+    libarchive-tools \
     && rm -rf /var/lib/apt/lists/*
 
 # Minimal client config so clamdscan knows where to find the clamd socket

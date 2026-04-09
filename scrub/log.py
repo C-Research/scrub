@@ -53,8 +53,8 @@ def fatal(msg: str) -> None:
 
 
 def summary(
-    total: int, clean: int, quarantined: int, errors: int, skipped: int
+    total: int, clean: int, quarantined: int, errors: int, skipped: int, expanded: int = 0
 ) -> None:
     logger.info(
-        f"[done] total={total}  clean={clean}  quarantined={quarantined}  errors={errors}  skipped={skipped}"
+        f"[done] total={total}  clean={clean}  quarantined={quarantined}  errors={errors}  skipped={skipped}  expanded={expanded}"
     )

@@ -1,6 +1,7 @@
 import asyncio
 import os
 import shutil
+import sys
 import tempfile
 import traceback
 from pathlib import Path
@@ -9,7 +10,19 @@ from . import fs, log, quarantine, sanitize
 from .clamav import scan_pngs
 from .converter import ConversionError, convert_to_pdf, rasterize_pdf
 
-_MAX_SIZE = 100 * 1024 * 1024  # 100 MB
+
+def _env_int(name: str, default: int) -> int:
+    val = os.environ.get(name, "").strip()
+    if not val:
+        return default
+    try:
+        return int(val)
+    except ValueError:
+        print(f"ERROR: {name} must be an integer, got {val!r}", file=sys.stderr)
+        sys.exit(1)
+
+
+_MAX_SIZE = _env_int("SCRUB_MAX_FILE_SIZE", 100) * 1024 * 1024
 
 # (magic_bytes_prefix, format_string)
 _MAGIC: list[tuple[bytes, str]] = [

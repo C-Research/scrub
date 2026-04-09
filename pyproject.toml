@@ -10,6 +10,7 @@ dependencies = [
     "aiofiles>=23.0",
     "pillow>=12.2.0",
     "PyMuPDF>=1.23",
+    "rarfile>=4.0",
 ]
 
 [project.scripts]
