@@ -7,12 +7,12 @@ from . import clamav, fs, log
 from .pipeline import process_file
 
 # Fixed container-internal paths (match bind mount targets in docker-compose.yml)
-_SOURCE     = Path("/data/source")
-_CLEAN      = Path("/data/clean")
+_SOURCE = Path("/data/source")
+_CLEAN = Path("/data/clean")
 _QUARANTINE = Path("/data/quarantine")
-_ERRORS     = Path("/data/errors")
-_LOG        = Path("/var/log/scrub/scrub.log")
-_SOCKET     = "/run/clamav/clamd.sock"
+_ERRORS = Path("/data/errors")
+_LOG = Path("/var/log/scrub/scrub.log")
+_SOCKET = "/run/clamav/clamd.sock"
 
 
 def _optional_int(name: str, default: int) -> int:
@@ -94,7 +94,13 @@ async def _run() -> int:
 
     log.debug("[queue]", f"dispatching {len(tasks)} file(s) across {workers} worker(s)")
     await asyncio.gather(*tasks)
-    log.summary(total=len(tasks), clean=clean_count, quarantined=quarantine_count, errors=error_count, skipped=skipped_count)
+    log.summary(
+        total=len(tasks),
+        clean=clean_count,
+        quarantined=quarantine_count,
+        errors=error_count,
+        skipped=skipped_count,
+    )
     return 1 if (quarantine_count or error_count) else 0
 
 

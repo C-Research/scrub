@@ -14,8 +14,8 @@ _MAX_SIZE = 100 * 1024 * 1024  # 100 MB
 # (magic_bytes_prefix, format_string)
 _MAGIC: list[tuple[bytes, str]] = [
     (b"%PDF", "pdf"),
-    (b"PK\x03\x04", "zip"),         # DOCX, XLSX, PPTX (ZIP-based Office)
-    (b"\xd0\xcf\x11\xe0", "ole"),   # DOC, XLS, PPT (OLE/CFB)
+    (b"PK\x03\x04", "zip"),  # DOCX, XLSX, PPTX (ZIP-based Office)
+    (b"\xd0\xcf\x11\xe0", "ole"),  # DOC, XLS, PPT (OLE/CFB)
     (b"\x89PNG\r\n\x1a\n", "png"),
     (b"\xff\xd8\xff", "jpg"),
     (b"II*\x00", "tiff"),
@@ -32,12 +32,19 @@ _OFFICE_FORMATS = {"pdf", "docx", "doc", "xlsx", "xls", "pptx", "ppt"}
 
 _SUPPORTED_EXTENSIONS = {
     ".pdf",
-    ".docx", ".doc",
-    ".xlsx", ".xls",
-    ".pptx", ".ppt",
-    ".png", ".jpg", ".jpeg",
-    ".tiff", ".tif",
-    ".bmp", ".gif",
+    ".docx",
+    ".doc",
+    ".xlsx",
+    ".xls",
+    ".pptx",
+    ".ppt",
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".tiff",
+    ".tif",
+    ".bmp",
+    ".gif",
 }
 
 
@@ -76,14 +83,31 @@ async def process_file(
     try:
         file_size = os.stat(src).st_size
     except OSError as e:
-        await _error(rel_str, errors_dir, rel_path, "unknown",
-                     "UnexpectedError", str(e), traceback.format_exc(), 0, "")
+        await _error(
+            rel_str,
+            errors_dir,
+            rel_path,
+            "unknown",
+            "UnexpectedError",
+            str(e),
+            traceback.format_exc(),
+            0,
+            "",
+        )
         return "error"
 
     if file_size > _MAX_SIZE:
-        await _error(rel_str, errors_dir, rel_path, "unknown",
-                     "FileTooLarge", f"File size {file_size} exceeds {_MAX_SIZE} byte limit",
-                     None, file_size, "")
+        await _error(
+            rel_str,
+            errors_dir,
+            rel_path,
+            "unknown",
+            "FileTooLarge",
+            f"File size {file_size} exceeds {_MAX_SIZE} byte limit",
+            None,
+            file_size,
+            "",
+        )
         return "error"
 
     # Read file and hash
@@ -96,9 +120,17 @@ async def process_file(
     log.start(rel_str, fmt)
 
     if fmt not in _IMAGE_FORMATS and fmt not in _OFFICE_FORMATS:
-        await _error(rel_str, errors_dir, rel_path, "unknown",
-                     "UnsupportedFormat", "Unrecognized magic bytes",
-                     None, file_size, file_sha256)
+        await _error(
+            rel_str,
+            errors_dir,
+            rel_path,
+            "unknown",
+            "UnsupportedFormat",
+            "Unrecognized magic bytes",
+            None,
+            file_size,
+            file_sha256,
+        )
         return "error"
 
     scan_dir = Path(tempfile.mkdtemp(prefix="scrub_scan_"))
@@ -111,9 +143,17 @@ async def process_file(
             pages = await _process_document(raw, fmt, scan_dir, timeout)
 
         if isinstance(pages, ConversionError):
-            await _error(rel_str, errors_dir, rel_path, fmt,
-                         pages.error_type, pages.detail,
-                         None, file_size, file_sha256)
+            await _error(
+                rel_str,
+                errors_dir,
+                rel_path,
+                fmt,
+                pages.error_type,
+                pages.detail,
+                None,
+                file_size,
+                file_sha256,
+            )
             return "error"
 
         log.debug(rel_str, "PROCESS", f"step=rasterized  pages={len(pages)}")
@@ -126,24 +166,45 @@ async def process_file(
         if not result.clean:
             if result.error:
                 log.debug(rel_str, "SCAN", f"result=error  detail={result.error}")
-                await _quarantine(rel_str, quarantine_dir, rel_path, fmt,
-                                  "ClamAVError", result.error,
-                                  None, file_size, file_sha256)
+                await _quarantine(
+                    rel_str,
+                    quarantine_dir,
+                    rel_path,
+                    fmt,
+                    "ClamAVError",
+                    result.error,
+                    None,
+                    file_size,
+                    file_sha256,
+                )
             else:
-                log.debug(rel_str, "SCAN", f"result=threat  virus={result.virus_name}  file={result.scanned_file}")
-                await _quarantine(rel_str, quarantine_dir, rel_path, fmt,
-                                  "ClamAVDetection",
-                                  f"ClamAV detected threat in {result.scanned_file}",
-                                  None, file_size, file_sha256,
-                                  virus_name=result.virus_name,
-                                  scanned_file=result.scanned_file)
+                log.debug(
+                    rel_str,
+                    "SCAN",
+                    f"result=threat  virus={result.virus_name}  file={result.scanned_file}",
+                )
+                await _quarantine(
+                    rel_str,
+                    quarantine_dir,
+                    rel_path,
+                    fmt,
+                    "ClamAVDetection",
+                    f"ClamAV detected threat in {result.scanned_file}",
+                    None,
+                    file_size,
+                    file_sha256,
+                    virus_name=result.virus_name,
+                    scanned_file=result.scanned_file,
+                )
             return "quarantine"
 
         log.debug(rel_str, "SCAN", "result=clean")
 
         # Write to clean dir
         is_xlsx = fmt in ("xlsx", "xls")
-        out_paths = fs.derive_output_paths(source_dir, clean_dir, rel_path, len(pages), is_xlsx)
+        out_paths = fs.derive_output_paths(
+            source_dir, clean_dir, rel_path, len(pages), is_xlsx
+        )
         for out_path, png_data in zip(out_paths, pages):
             log.debug(rel_str, "WRITE", str(out_path))
             await fs.write_png(out_path, png_data)
@@ -152,12 +213,30 @@ async def process_file(
         return "clean"
 
     except ConversionError as e:
-        await _error(rel_str, errors_dir, rel_path, fmt,
-                     e.error_type, e.detail, traceback.format_exc(), file_size, file_sha256)
+        await _error(
+            rel_str,
+            errors_dir,
+            rel_path,
+            fmt,
+            e.error_type,
+            e.detail,
+            traceback.format_exc(),
+            file_size,
+            file_sha256,
+        )
         return "error"
     except Exception as e:
-        await _error(rel_str, errors_dir, rel_path, fmt,
-                     "UnexpectedError", str(e), traceback.format_exc(), file_size, file_sha256)
+        await _error(
+            rel_str,
+            errors_dir,
+            rel_path,
+            fmt,
+            "UnexpectedError",
+            str(e),
+            traceback.format_exc(),
+            file_size,
+            file_sha256,
+        )
         return "error"
     finally:
         shutil.rmtree(scan_dir, ignore_errors=True)
@@ -171,7 +250,9 @@ async def _process_image(
     try:
         tmp.write_bytes(raw)
         try:
-            png_bytes = await loop.run_in_executor(None, sanitize.process_image_file, tmp)
+            png_bytes = await loop.run_in_executor(
+                None, sanitize.process_image_file, tmp
+            )
         except Exception as e:
             return ConversionError("ImageDecodeError", f"Pillow failed: {e}")
     finally:
@@ -217,7 +298,9 @@ async def _process_document(
                     None, sanitize.reencode_png, rgb_bytes, w, h
                 )
             except Exception as e:
-                raise ConversionError("PillowEncodeError", f"page {i + 1} re-encode failed: {e}")
+                raise ConversionError(
+                    "PillowEncodeError", f"page {i + 1} re-encode failed: {e}"
+                )
 
             scan_path = scan_dir / f"page_{i + 1:03d}.png"
             await loop.run_in_executor(None, scan_path.write_bytes, png_bytes)

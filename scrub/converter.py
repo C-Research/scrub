@@ -30,7 +30,9 @@ class ConversionError(Exception):
 def _setup_lo_profile(profile_dir: Path) -> None:
     user_dir = profile_dir / "user"
     user_dir.mkdir(parents=True, exist_ok=True)
-    (user_dir / "registrymodifications.xcu").write_text(_MACRO_SECURITY_XCU, encoding="utf-8")
+    (user_dir / "registrymodifications.xcu").write_text(
+        _MACRO_SECURITY_XCU, encoding="utf-8"
+    )
 
 
 def _lo_cmd(input_path: Path, fmt: str, profile_dir: Path, out_dir: Path) -> list[str]:
@@ -39,8 +41,10 @@ def _lo_cmd(input_path: Path, fmt: str, profile_dir: Path, out_dir: Path) -> lis
         "--headless",
         "--norestore",
         f"-env:UserInstallation=file://{profile_dir}",
-        "--convert-to", "pdf",
-        "--outdir", str(out_dir),
+        "--convert-to",
+        "pdf",
+        "--outdir",
+        str(out_dir),
     ]
     if fmt in ("xlsx", "xls"):
         # Request calc PDF export; fit-to-page depends on document's own page settings
@@ -89,7 +93,9 @@ async def convert_to_pdf(
 
         pdfs = list(out_dir.glob("*.pdf"))
         if not pdfs:
-            raise ConversionError("LibreOfficeError", "LibreOffice produced no PDF output")
+            raise ConversionError(
+                "LibreOfficeError", "LibreOffice produced no PDF output"
+            )
 
         # Move PDF out so we can clean up out_dir
         pdf_dest = Path(tempfile.mktemp(suffix=".pdf"))
@@ -119,7 +125,9 @@ def rasterize_pdf(pdf_path: Path) -> list[tuple[bytes, int, int]]:
                 pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
                 results.append((bytes(pix.samples), pix.width, pix.height))
             except Exception as e:
-                raise ConversionError("PyMuPDFError", f"page {page.number} render failed: {e}")
+                raise ConversionError(
+                    "PyMuPDFError", f"page {page.number} render failed: {e}"
+                )
         return results
     finally:
         doc.close()

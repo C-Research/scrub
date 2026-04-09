@@ -40,7 +40,7 @@ async def scan_pngs(
         "clamdscan",
         "--no-summary",
         "--infected",
-        "--stream",          # stream file content over socket; clamd has no access to our fs
+        "--stream",  # stream file content over socket; clamd has no access to our fs
         "--config-file=/etc/clamav/clamd.conf",
         "--",
         *[str(p) for p in png_paths],
