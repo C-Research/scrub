@@ -2,12 +2,12 @@
 Basic sanity tests. No ClamAV daemon required — scan_pngs is patched where needed.
 No LibreOffice required — document conversion tests use the image pipeline only.
 """
+
 import io
 import json
 from pathlib import Path
 from unittest.mock import AsyncMock
 
-import pytest
 from PIL import Image
 
 from scrub import quarantine as qmod
@@ -23,6 +23,7 @@ FIXTURES = Path(__file__).parent / "fixtures"
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_png(width: int = 8, height: int = 8, color: tuple = (128, 64, 32)) -> bytes:
     buf = io.BytesIO()
     Image.new("RGB", (width, height), color=color).save(buf, format="PNG")
@@ -37,6 +38,7 @@ def _write_png(path: Path, **kwargs) -> None:
 # ---------------------------------------------------------------------------
 # detect_format
 # ---------------------------------------------------------------------------
+
 
 class TestDetectFormat:
     def test_pdf(self):
@@ -84,13 +86,18 @@ class TestDetectFormat:
 # derive_output_paths
 # ---------------------------------------------------------------------------
 
+
 class TestDeriveOutputPaths:
     def test_single_page(self, tmp_path):
-        paths = derive_output_paths(tmp_path / "s", tmp_path / "c", Path("report.pdf"), 1, False)
+        paths = derive_output_paths(
+            tmp_path / "s", tmp_path / "c", Path("report.pdf"), 1, False
+        )
         assert paths == [tmp_path / "c/report/page_001.png"]
 
     def test_multi_page(self, tmp_path):
-        paths = derive_output_paths(tmp_path / "s", tmp_path / "c", Path("report.pdf"), 3, False)
+        paths = derive_output_paths(
+            tmp_path / "s", tmp_path / "c", Path("report.pdf"), 3, False
+        )
         assert paths == [
             tmp_path / "c/report/page_001.png",
             tmp_path / "c/report/page_002.png",
@@ -98,7 +105,9 @@ class TestDeriveOutputPaths:
         ]
 
     def test_xlsx_sheet_prefix(self, tmp_path):
-        paths = derive_output_paths(tmp_path / "s", tmp_path / "c", Path("budget.xlsx"), 2, True)
+        paths = derive_output_paths(
+            tmp_path / "s", tmp_path / "c", Path("budget.xlsx"), 2, True
+        )
         assert paths[0].name == "sheet_001.png"
         assert paths[1].name == "sheet_002.png"
 
@@ -109,13 +118,16 @@ class TestDeriveOutputPaths:
         assert paths == [tmp_path / "c/finance/q1/budget/page_001.png"]
 
     def test_zero_padding_to_three_digits(self, tmp_path):
-        paths = derive_output_paths(tmp_path / "s", tmp_path / "c", Path("f.pdf"), 10, False)
+        paths = derive_output_paths(
+            tmp_path / "s", tmp_path / "c", Path("f.pdf"), 10, False
+        )
         assert paths[9].name == "page_010.png"
 
 
 # ---------------------------------------------------------------------------
 # quarantine module
 # ---------------------------------------------------------------------------
+
 
 class TestQuarantine:
     def test_sha256_deterministic(self):
@@ -126,10 +138,15 @@ class TestQuarantine:
 
     def test_sha256_known_value(self):
         # echo -n "" | sha256sum
-        assert qmod.sha256(b"") == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        assert (
+            qmod.sha256(b"")
+            == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        )
 
     def test_build_manifest_required_fields(self):
-        m = qmod.build_manifest("a.pdf", "pdf", "ClamAVDetection", "threat", None, 1024, "abc123")
+        m = qmod.build_manifest(
+            "a.pdf", "pdf", "ClamAVDetection", "threat", None, 1024, "abc123"
+        )
         assert m["input_path"] == "a.pdf"
         assert m["format_detected"] == "pdf"
         assert m["error_type"] == "ClamAVDetection"
@@ -140,21 +157,30 @@ class TestQuarantine:
 
     def test_build_manifest_virus_fields(self):
         m = qmod.build_manifest(
-            "bad.png", "png", "ClamAVDetection", "threat",
-            None, 512, "def456",
-            virus_name="Eicar.Test", scanned_file="page_001.png",
+            "bad.png",
+            "png",
+            "ClamAVDetection",
+            "threat",
+            None,
+            512,
+            "def456",
+            virus_name="Eicar.Test",
+            scanned_file="page_001.png",
         )
         assert m["virus_name"] == "Eicar.Test"
         assert m["scanned_file"] == "page_001.png"
 
     def test_build_manifest_stack_trace(self):
-        m = qmod.build_manifest("f.doc", "doc", "LibreOfficeError", "crash", "tb here", 0, "")
+        m = qmod.build_manifest(
+            "f.doc", "doc", "LibreOfficeError", "crash", "tb here", 0, ""
+        )
         assert m["stack_trace"] == "tb here"
 
 
 # ---------------------------------------------------------------------------
 # sanitize
 # ---------------------------------------------------------------------------
+
 
 class TestReencodePng:
     def test_output_is_valid_png(self):
@@ -183,10 +209,13 @@ class TestReencodePng:
 # pipeline — image path, ClamAV mocked
 # ---------------------------------------------------------------------------
 
+
 class TestProcessFileImagePath:
     async def test_clean_image_written_to_clean_dir(self, tmp_path, monkeypatch):
         _write_png(tmp_path / "source/photo.png")
-        monkeypatch.setattr("scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True)))
+        monkeypatch.setattr(
+            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
+        )
 
         result = await process_file(
             rel_path=Path("photo.png"),
@@ -202,7 +231,9 @@ class TestProcessFileImagePath:
 
     async def test_clean_image_not_in_quarantine_or_errors(self, tmp_path, monkeypatch):
         _write_png(tmp_path / "source/photo.png")
-        monkeypatch.setattr("scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True)))
+        monkeypatch.setattr(
+            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
+        )
 
         await process_file(
             rel_path=Path("photo.png"),
@@ -213,14 +244,26 @@ class TestProcessFileImagePath:
             socket_path="/dev/null",
         )
 
-        assert not list((tmp_path / "quarantine").rglob("*.json")) if (tmp_path / "quarantine").exists() else True
-        assert not list((tmp_path / "errors").rglob("*.json")) if (tmp_path / "errors").exists() else True
+        assert (
+            not list((tmp_path / "quarantine").rglob("*.json"))
+            if (tmp_path / "quarantine").exists()
+            else True
+        )
+        assert (
+            not list((tmp_path / "errors").rglob("*.json"))
+            if (tmp_path / "errors").exists()
+            else True
+        )
 
     async def test_detection_goes_to_quarantine(self, tmp_path, monkeypatch):
         _write_png(tmp_path / "source/bad.png")
         monkeypatch.setattr(
             "scrub.pipeline.scan_pngs",
-            AsyncMock(return_value=ScanResult(clean=False, virus_name="Eicar.Test", scanned_file="page_001.png")),
+            AsyncMock(
+                return_value=ScanResult(
+                    clean=False, virus_name="Eicar.Test", scanned_file="page_001.png"
+                )
+            ),
         )
 
         result = await process_file(
@@ -241,7 +284,11 @@ class TestProcessFileImagePath:
         _write_png(tmp_path / "source/bad.png")
         monkeypatch.setattr(
             "scrub.pipeline.scan_pngs",
-            AsyncMock(return_value=ScanResult(clean=False, virus_name="Eicar.Test", scanned_file="page_001.png")),
+            AsyncMock(
+                return_value=ScanResult(
+                    clean=False, virus_name="Eicar.Test", scanned_file="page_001.png"
+                )
+            ),
         )
 
         await process_file(
@@ -253,7 +300,9 @@ class TestProcessFileImagePath:
             socket_path="/dev/null",
         )
 
-        assert not (tmp_path / "clean").exists() or not list((tmp_path / "clean").rglob("*.png"))
+        assert not (tmp_path / "clean").exists() or not list(
+            (tmp_path / "clean").rglob("*.png")
+        )
 
     async def test_clamav_error_goes_to_quarantine(self, tmp_path, monkeypatch):
         _write_png(tmp_path / "source/suspect.png")
@@ -290,14 +339,20 @@ class TestProcessFileImagePath:
         )
 
         assert result == "skipped"
-        assert not list((tmp_path / "errors").rglob("*")) if (tmp_path / "errors").exists() else True
+        assert (
+            not list((tmp_path / "errors").rglob("*"))
+            if (tmp_path / "errors").exists()
+            else True
+        )
 
     async def test_unsupported_magic_bytes_goes_to_errors(self, tmp_path, monkeypatch):
         # Extension is supported (.pdf) but magic bytes are wrong → UnsupportedFormat error
         src = tmp_path / "source/fake.pdf"
         src.parent.mkdir(parents=True, exist_ok=True)
         src.write_bytes(b"XXXXX not a real pdf XXXXX")
-        monkeypatch.setattr("scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True)))
+        monkeypatch.setattr(
+            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
+        )
 
         result = await process_file(
             rel_path=Path("fake.pdf"),
@@ -317,7 +372,10 @@ class TestProcessFileImagePath:
         src.parent.mkdir(parents=True, exist_ok=True)
         src.write_bytes(_make_png())
         # Fake the stat size past the 100 MB limit
-        monkeypatch.setattr("scrub.pipeline.os.stat", lambda _: type("S", (), {"st_size": 200 * 1024 * 1024})())
+        monkeypatch.setattr(
+            "scrub.pipeline.os.stat",
+            lambda _: type("S", (), {"st_size": 200 * 1024 * 1024})(),
+        )
 
         result = await process_file(
             rel_path=Path("big.png"),
@@ -334,7 +392,9 @@ class TestProcessFileImagePath:
 
     async def test_subdirectory_structure_preserved(self, tmp_path, monkeypatch):
         _write_png(tmp_path / "source/reports/q1/photo.png")
-        monkeypatch.setattr("scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True)))
+        monkeypatch.setattr(
+            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
+        )
 
         await process_file(
             rel_path=Path("reports/q1/photo.png"),

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import shutil
 import tempfile
 from pathlib import Path
@@ -98,7 +99,9 @@ async def convert_to_pdf(
             )
 
         # Move PDF out so we can clean up out_dir
-        pdf_dest = Path(tempfile.mktemp(suffix=".pdf"))
+        fd, _pdf_dest = tempfile.mkstemp(suffix=".pdf")
+        os.close(fd)
+        pdf_dest = Path(_pdf_dest)
         shutil.move(str(pdfs[0]), pdf_dest)
         return pdf_dest
 

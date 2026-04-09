@@ -246,7 +246,9 @@ async def _process_image(
     raw: bytes, fmt: str, scan_dir: Path
 ) -> list[bytes] | ConversionError:
     loop = asyncio.get_running_loop()
-    tmp = Path(tempfile.mktemp(suffix=f".{fmt}"))
+    fd, _tmp = tempfile.mkstemp(suffix=f".{fmt}")
+    os.close(fd)
+    tmp = Path(_tmp)
     try:
         tmp.write_bytes(raw)
         try:
@@ -272,7 +274,9 @@ async def _process_document(
     raw: bytes, fmt: str, scan_dir: Path, timeout: int
 ) -> list[bytes] | ConversionError:
     loop = asyncio.get_running_loop()
-    tmp_input = Path(tempfile.mktemp(suffix=f".{fmt}"))
+    fd, _tmp_input = tempfile.mkstemp(suffix=f".{fmt}")
+    os.close(fd)
+    tmp_input = Path(_tmp_input)
     pdf_path = None
     try:
         tmp_input.write_bytes(raw)
