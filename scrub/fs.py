@@ -44,8 +44,9 @@ def derive_output_paths(
     is_xlsx: bool,
 ) -> list[Path]:
     prefix = "sheet" if is_xlsx else "page"
-    base = clean_dir / rel_path.parent / rel_path.stem
-    return [base / f"{prefix}_{i + 1:03d}.png" for i in range(page_count)]
+    stem = rel_path.name.replace("/", "_")
+    base_dir = clean_dir / rel_path.parent
+    return [base_dir / f"{stem}.{prefix}_{i + 1:03d}.png" for i in range(page_count)]
 
 
 async def write_png(path: Path, data: bytes) -> None:

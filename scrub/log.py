@@ -44,8 +44,8 @@ def error(input_path: str, error_type: str, detail: str = "") -> None:
     logger.warning(f"{input_path} ERROR error_type={error_type} {detail}".rstrip())
 
 
-def skip(input_path: str, ext: str) -> None:
-    logger.info(f"{input_path} SKIPPED ext={ext or '(none)'}")
+def skip(input_path: str, reason: str) -> None:
+    logger.info(f"{input_path} SKIPPED reason={reason or '(none)'}")
 
 
 def fatal(msg: str) -> None:

@@ -92,36 +92,36 @@ class TestDeriveOutputPaths:
         paths = derive_output_paths(
             tmp_path / "s", tmp_path / "c", Path("report.pdf"), 1, False
         )
-        assert paths == [tmp_path / "c/report/page_001.png"]
+        assert paths == [tmp_path / "c/report.pdf.page_001.png"]
 
     def test_multi_page(self, tmp_path):
         paths = derive_output_paths(
             tmp_path / "s", tmp_path / "c", Path("report.pdf"), 3, False
         )
         assert paths == [
-            tmp_path / "c/report/page_001.png",
-            tmp_path / "c/report/page_002.png",
-            tmp_path / "c/report/page_003.png",
+            tmp_path / "c/report.pdf.page_001.png",
+            tmp_path / "c/report.pdf.page_002.png",
+            tmp_path / "c/report.pdf.page_003.png",
         ]
 
     def test_xlsx_sheet_prefix(self, tmp_path):
         paths = derive_output_paths(
             tmp_path / "s", tmp_path / "c", Path("budget.xlsx"), 2, True
         )
-        assert paths[0].name == "sheet_001.png"
-        assert paths[1].name == "sheet_002.png"
+        assert paths[0].name == "budget.xlsx.sheet_001.png"
+        assert paths[1].name == "budget.xlsx.sheet_002.png"
 
     def test_preserves_subdirectory(self, tmp_path):
         paths = derive_output_paths(
             tmp_path / "s", tmp_path / "c", Path("finance/q1/budget.pdf"), 1, False
         )
-        assert paths == [tmp_path / "c/finance/q1/budget/page_001.png"]
+        assert paths == [tmp_path / "c/finance/q1/budget.pdf.page_001.png"]
 
     def test_zero_padding_to_three_digits(self, tmp_path):
         paths = derive_output_paths(
             tmp_path / "s", tmp_path / "c", Path("f.pdf"), 10, False
         )
-        assert paths[9].name == "page_010.png"
+        assert paths[9].name == "f.pdf.page_010.png"
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +227,7 @@ class TestProcessFileImagePath:
         )
 
         assert result == "clean"
-        assert (tmp_path / "clean/photo/page_001.png").exists()
+        assert (tmp_path / "clean/photo.png.page_001.png").exists()
 
     async def test_clean_image_not_in_quarantine_or_errors(self, tmp_path, monkeypatch):
         _write_png(tmp_path / "source/photo.png")
@@ -405,4 +405,41 @@ class TestProcessFileImagePath:
             socket_path="/dev/null",
         )
 
-        assert (tmp_path / "clean/reports/q1/photo/page_001.png").exists()
+        assert (tmp_path / "clean/reports/q1/photo.png.page_001.png").exists()
+
+    async def test_already_clean_skipped(self, tmp_path):
+        _write_png(tmp_path / "source/photo.png")
+        # Pre-populate clean output so the file appears already processed
+        sentinel = tmp_path / "clean/photo.png.page_001.png"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_bytes(b"fake")
+
+        result = await process_file(
+            rel_path=Path("photo.png"),
+            source_dir=tmp_path / "source",
+            clean_dir=tmp_path / "clean",
+            quarantine_dir=tmp_path / "quarantine",
+            errors_dir=tmp_path / "errors",
+            socket_path="/dev/null",
+        )
+
+        assert result == "skipped"
+        assert sentinel.read_bytes() == b"fake"  # not overwritten
+
+    async def test_already_clean_skipped_subdir(self, tmp_path):
+        _write_png(tmp_path / "source/reports/q1/photo.png")
+        sentinel = tmp_path / "clean/reports/q1/photo.png.page_001.png"
+        sentinel.parent.mkdir(parents=True, exist_ok=True)
+        sentinel.write_bytes(b"fake")
+
+        result = await process_file(
+            rel_path=Path("reports/q1/photo.png"),
+            source_dir=tmp_path / "source",
+            clean_dir=tmp_path / "clean",
+            quarantine_dir=tmp_path / "quarantine",
+            errors_dir=tmp_path / "errors",
+            socket_path="/dev/null",
+        )
+
+        assert result == "skipped"
+        assert sentinel.read_bytes() == b"fake"  # not overwritten

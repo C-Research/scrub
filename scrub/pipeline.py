@@ -92,6 +92,17 @@ async def process_file(
         log.skip(rel_str, ext)
         return "skipped"
 
+    # Skip if clean output already exists
+    out_dir = clean_dir / rel_path.parent
+    sentinel = (f"{rel_path.name}.page_", f"{rel_path.name}.sheet_")
+    try:
+        with os.scandir(out_dir) as it:
+            if any(e.name.startswith(sentinel) for e in it):
+                log.skip(rel_str, "already_clean")
+                return "skipped"
+    except OSError:
+        pass
+
     # Pre-flight: size check before reading full file
     try:
         file_size = os.stat(src).st_size
@@ -219,6 +230,8 @@ async def process_file(
             source_dir, clean_dir, rel_path, len(pages), is_xlsx
         )
         for out_path, png_data in zip(out_paths, pages):
+            if not png_data:
+                continue
             log.debug(rel_str, "WRITE", str(out_path))
             await fs.write_png(out_path, png_data)
 
