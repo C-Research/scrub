@@ -52,7 +52,8 @@ RUN groupadd --gid 1000 scrub && \
 WORKDIR /app
 COPY pyproject.toml ./
 COPY scrub/ ./scrub/
-RUN pip install --no-cache-dir .
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install .
 
 USER scrub
 
