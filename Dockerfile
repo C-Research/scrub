@@ -14,6 +14,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     fonts-liberation \
     fonts-dejavu-core \
     fonts-noto-core \
+    # CJK fonts — Simplified Chinese, Traditional Chinese, Japanese, Korean
+    fonts-noto-cjk \
+    fonts-wqy-microhei \
+    fonts-wqy-zenhei \
+    fonts-arphic-ukai \
+    fonts-arphic-uming \
     # Java runtime — required by LibreOffice for XLSX/XLS processing
     default-jre-headless \
     libreoffice-java-common \
@@ -23,6 +29,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # bsdtar (libarchive-tools) — used by the rarfile Python package for RAR extraction
     libarchive-tools \
     && rm -rf /var/lib/apt/lists/*
+
+# fontconfig substitution: map Windows CJK font names to installed equivalents
+COPY docker/99-cjk-subst.conf /etc/fonts/conf.d/99-cjk-subst.conf
+RUN fc-cache -f
 
 # Minimal client config so clamdscan knows where to find the clamd socket
 RUN printf 'LocalSocket /run/clamav/clamd.sock\n' > /etc/clamav/clamd.conf
