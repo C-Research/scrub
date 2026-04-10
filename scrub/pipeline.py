@@ -41,7 +41,7 @@ _MAGIC: list[tuple[bytes, str]] = [
 _ZIP_EXT_MAP = {".docx": "docx", ".pptx": "pptx", ".xlsx": "xlsx"}
 _OLE_EXT_MAP = {".doc": "doc", ".ppt": "ppt", ".xls": "xls"}
 _IMAGE_FORMATS = {"png", "jpg", "tiff", "bmp", "gif"}
-_OFFICE_FORMATS = {"pdf", "docx", "doc", "xlsx", "xls", "pptx", "ppt"}
+_OFFICE_FORMATS = {"pdf", "docx", "doc", "xlsx", "xls", "pptx", "ppt", "csv"}
 
 _SUPPORTED_EXTENSIONS = {
     ".pdf",
@@ -58,6 +58,7 @@ _SUPPORTED_EXTENSIONS = {
     ".tif",
     ".bmp",
     ".gif",
+    ".csv",
 }
 
 
@@ -70,6 +71,8 @@ def detect_format(header: bytes, filename: str) -> str:
             if fmt == "ole":
                 return _OLE_EXT_MAP.get(ext, "doc")
             return fmt
+    if ext == ".csv":
+        return "csv"
     return "unknown"
 
 
@@ -225,7 +228,7 @@ async def process_file(
         log.debug(rel_str, "SCAN", "result=clean")
 
         # Write to clean dir
-        is_xlsx = fmt in ("xlsx", "xls")
+        is_xlsx = fmt in ("xlsx", "xls", "csv")
         out_paths = fs.derive_output_paths(
             source_dir, clean_dir, rel_path, len(pages), is_xlsx
         )

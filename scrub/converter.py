@@ -47,9 +47,11 @@ def _lo_cmd(input_path: Path, fmt: str, profile_dir: Path, out_dir: Path) -> lis
         "--outdir",
         str(out_dir),
     ]
-    if fmt in ("xlsx", "xls"):
-        # Request calc PDF export; fit-to-page depends on document's own page settings
+    if fmt == "xlsx":
+        # Explicit filter for XLSX (Open XML); XLS (OLE binary) auto-detects correctly
         cmd += ["--infilter=Calc MS Excel 2007 XML"]
+    if fmt == "csv":
+        cmd += ["--infilter=Text - txt - csv (StarCalc)"]
     cmd.append(str(input_path))
     return cmd
 
