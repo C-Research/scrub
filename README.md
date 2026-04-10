@@ -1,6 +1,6 @@
 # scrub
 
-CDR (Content Disarm and Reconstruction) tool. Converts PDF, office documents and images to sanitized PNGs by re-encoding through a pixel-level pipeline. Every input is assumed adversarially crafted. Applies some TLC to your infected files telling malware:
+CDR (Content Disarm and Reconstruction) tool. Converts PDF, office documents and images to sanitized PNGs by re-encoding through a pixel-level pipeline. Every input is assumed adversarially crafted. Output PNGs are scanned with ClamAV just to make sure everything is clean. Applies some TLC to your infected files telling malware:
 
 So no, I don't want your number
 No, I don't want to give you mine and
