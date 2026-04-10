@@ -7,7 +7,7 @@ No, I don't want to give you mine and
 No, I don't want to meet you nowhere
 No, I don't want none of your time
 
-**Supported formats:** PDF, DOCX, DOC, XLSX, XLS, PPTX, PPT, PNG, JPG, TIFF, BMP, GIF, ZIP, RAR
+**Supported formats:** PDF, DOCX, DOC, XLSX, XLS, PPTX, PPT, CSV, PNG, JPG, TIFF, BMP, GIF, ZIP, RAR, GZ, TAR.GZ, TGZ
 
 **Pipeline:** archives expanded → file → magic-byte detection → LibreOffice → PDF → PyMuPDF → raw pixels → Pillow re-encode → ClamAV scan → clean PNG
 
@@ -20,73 +20,13 @@ No, I don't want none of your time
 
 ### 1. Install gVisor
 
-```bash
-sudo apt-get update && sudo apt-get install -y apt-transport-https ca-certificates gnupg
+Follow the [gVisor installation docs](https://gvisor.dev/docs/user_guide/install/) to install `runsc` and register it with Docker.
 
-curl -fsSL https://gvisor.dev/archive.key | \
-  sudo gpg --dearmor -o /usr/share/keyrings/gvisor-archive-keyring.gpg
+Two scrub-specific requirements when configuring the runtime in `daemon.json`:
+- `--host-uds=open` is required. The ClamAV socket directory must be a **bind mount** (not a named Docker volume) — see `docker-compose.yml`. gVisor's gofer proxy resolves host paths for bind mounts, which is what lets `--host-uds=open` forward the `connect()` syscall to the real host-side socket. Named volumes go through a different gofer code path that doesn't support the `ConnectAt` RPC, so the socket file is visible inside the sandbox but connections fail.
+- On bare metal with KVM available, use `runsc-kvm` (hardware virtualisation) rather than `runsc` (ptrace/systrap) — significantly faster for LibreOffice workloads. Change the `runtime:` line in `docker-compose.yml` if KVM isn't available.
 
-echo "deb [arch=amd64 signed-by=/usr/share/keyrings/gvisor-archive-keyring.gpg] \
-  https://storage.googleapis.com/gvisor/releases release main" | \
-  sudo tee /etc/apt/sources.list.d/gvisor.list
-
-sudo apt-get update && sudo apt-get install -y runsc
-sudo runsc install   # patches Docker daemon config and AppArmor
-```
-
-### 2. Configure Docker runtimes
-
-Add to `/etc/docker/daemon.json` (create it if it doesn't exist):
-
-```json
-{
-  "runtimes": {
-    "runsc": {
-      "path": "/usr/local/sbin/runsc"
-    },
-    "runsc-kvm": {
-      "path": "/usr/local/sbin/runsc",
-      "runtimeArgs": ["--platform=kvm"]
-    }
-  }
-}
-```
-
-Then restart Docker:
-
-```bash
-sudo systemctl restart docker
-```
-
-### 3. Enable KVM (recommended)
-
-If on bare metal.
-
-`runsc-kvm` uses hardware virtualisation instead of ptrace for syscall interception — significantly faster for CPU-heavy workloads like LibreOffice. Check whether your machine supports it:
-
-```bash
-ls /dev/kvm      # should exist
-groups | grep kvm   # your user should be in the kvm group
-```
-
-If not in the `kvm` group:
-
-```bash
-sudo usermod -aG kvm $USER
-# log out and back in for the group to take effect
-```
-
-Use `runsc` (systrap mode) as a fallback if KVM isn't available. The `docker-compose.yml` defaults to `runsc-kvm` — change it to `runsc` if needed.
-
-### 4. Enable gVisor in docker-compose.yml
-
-Uncomment line 21:
-
-```yaml
-runtime: runsc-kvm
-```
-
-### 5. Build the image
+### 2. Build the image
 
 ```bash
 docker compose build
@@ -99,8 +39,11 @@ ClamAV signature download happens at first run, not at build time.
 ### Prepare directories
 
 ```bash
-mkdir -p data/source data/clean data/quarantine data/logs
+mkdir -p data/source data/clean data/quarantine data/logs data/clamav-socket
+chmod 1777 data/clamav-socket
 ```
+
+The `chmod 1777` on `data/clamav-socket` is required: the ClamAV container runs as UID 100 (clamav user) and needs write access to create the socket file. The sticky bit prevents other processes from deleting the socket.
 
 Place input files in `data/source/`. Subdirectory structure is preserved in output. ZIP and RAR archives are automatically expanded before processing — members are extracted alongside the archive in the source directory.
 
@@ -200,19 +143,19 @@ docker inspect scrub-scrub-1 --format '{{.HostConfig.Runtime}}'
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────┐
-│  scrub  [runtime: runsc-kvm]                    │
-│  network_mode: none  |  read_only  |  cap_drop  │
-│                                                  │
-│  cli.py → archive.py (expand .zip/.rar)         │
-│        → pipeline.py (per file)                 │
-│    ├── already-clean check (skip if exists)     │
-│    ├── LibreOffice (subprocess, per file)        │
-│    ├── PyMuPDF (rasterise PDF)                  │
-│    ├── Pillow (pixel re-encode → PNG)           │
-│    └── clamdscan --stream (scan before write)   │
-│                    │                             │
-└────────────────────┼─────────────────────────────┘
+┌───────────────────────────────────────────────────┐
+│  scrub  [runtime: runsc-kvm]                      │
+│  network_mode: none  |  read_only  |  cap_drop    │
+│                                                   │
+│  cli.py → archive.py (expand .zip/.rar)           │
+│        → pipeline.py (per file)                   │
+│    ├── already-clean check (skip if exists)       │
+│    ├── LibreOffice (subprocess, per file)         │
+│    ├── PyMuPDF (rasterise PDF)                    │
+│    ├── Pillow (pixel re-encode → PNG)             │
+│    └── clamdscan --stream (scan before write)     │
+│                    │                              │
+└────────────────────┼──────────────────────────────┘
                      │ Unix socket
               /run/clamav/clamd.sock
          (shared Docker volume: clamav-socket)
@@ -220,7 +163,7 @@ docker inspect scrub-scrub-1 --format '{{.HostConfig.Runtime}}'
 ┌────────────────────┼─────────────────────────────┐
 │  clamav  [runtime: runc]                         │
 │  clamd + freshclam                               │
-└─────────────────────────────────────────────────┘
+└──────────────────────────────────────────────────┘
 ```
 
 The `scrub` container has no network interface (`network_mode: none`). ClamAV communication is entirely via Unix socket on a shared volume. The gVisor sandbox means a LibreOffice or PyMuPDF exploit cannot reach the host kernel.
