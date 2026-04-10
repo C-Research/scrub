@@ -8,9 +8,11 @@ version = "0.1.0"
 requires-python = ">=3.10,<4"
 dependencies = [
     "aiofiles>=23.0",
+    "defusedxml>=0.7",
     "pillow>=12.2.0",
     "PyMuPDF>=1.23",
     "rarfile>=4.0",
+    "weasyprint>=61.0",
 ]
 
 [project.scripts]

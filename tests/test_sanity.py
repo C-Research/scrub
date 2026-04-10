@@ -12,6 +12,7 @@ from PIL import Image
 
 from scrub import quarantine as qmod
 from scrub.clamav import ScanResult
+from scrub.converter import _block_external_fetches, _csv_to_html, _xml_to_text
 from scrub.fs import derive_output_paths
 from scrub.pipeline import detect_format, process_file
 from scrub.sanitize import reencode_png
@@ -67,6 +68,48 @@ class TestDetectFormat:
 
     def test_unknown(self):
         assert detect_format(b"XXXXXXXXXX", "foo.bin") == "unknown"
+
+    # Text format detection
+    def test_txt_by_extension(self):
+        assert detect_format(b"Hello world", "notes.txt") == "txt"
+
+    def test_html_by_doctype(self):
+        assert detect_format(b"<!DOCTYPE html><html>", "page.html") == "html"
+
+    def test_html_by_tag(self):
+        assert detect_format(b"<html><head>", "page.htm") == "html"
+
+    def test_html_by_extension_only(self):
+        assert detect_format(b"some text content", "page.html") == "html"
+
+    def test_htm_extension(self):
+        assert detect_format(b"<body>hi</body>", "page.htm") == "html"
+
+    def test_xml_by_declaration(self):
+        assert detect_format(b"<?xml version='1.0'?>", "data.xml") == "xml"
+
+    def test_xml_by_extension(self):
+        assert detect_format(b"<root><item>text</item></root>", "data.xml") == "xml"
+
+    def test_html_bom_stripped(self):
+        # UTF-8 BOM before <!DOCTYPE html>
+        bom_html = b"\xef\xbb\xbf<!doctype html><html>"
+        assert detect_format(bom_html, "page.html") == "html"
+
+    def test_xml_bom_stripped(self):
+        bom_xml = b"\xef\xbb\xbf<?xml version='1.0'?>"
+        assert detect_format(bom_xml, "data.xml") == "xml"
+
+    def test_html_content_overrides_txt_extension(self):
+        # File named .txt but starts with HTML markers — sniff wins
+        assert detect_format(b"<html><head></head>", "trick.txt") == "html"
+
+    def test_magic_bytes_take_precedence_over_html_sniff(self):
+        # ZIP magic bytes — should not be detected as html even if content follows
+        assert detect_format(b"PK\x03\x04<html>", "doc.docx") == "docx"
+
+    def test_csv_by_extension(self):
+        assert detect_format(b"name,value\nalpha,1\n", "data.csv") == "csv"
 
     # Real fixture files — authentic magic bytes
     def test_fixture_pdf(self):
@@ -443,3 +486,175 @@ class TestProcessFileImagePath:
 
         assert result == "skipped"
         assert sentinel.read_bytes() == b"fake"  # not overwritten
+
+
+# ---------------------------------------------------------------------------
+# _block_external_fetches
+# ---------------------------------------------------------------------------
+
+
+class TestBlockExternalFetches:
+    def test_raises_on_http_url(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="external fetch blocked"):
+            _block_external_fetches("http://example.com/beacon.png")
+
+    def test_raises_on_https_url(self):
+        import pytest
+
+        with pytest.raises(ValueError, match="external fetch blocked"):
+            _block_external_fetches("https://example.com/style.css")
+
+    def test_passes_data_uri(self):
+        # A data URI should not raise our ValueError — it's inline content
+        uri = "data:text/plain;base64,SGVsbG8="
+        try:
+            _block_external_fetches(uri)
+        except Exception as exc:
+            assert "external fetch blocked" not in str(exc)
+
+
+# ---------------------------------------------------------------------------
+# _csv_to_html
+# ---------------------------------------------------------------------------
+
+
+class TestCsvToHtml:
+    def test_formula_injection_escaped(self):
+        raw = b"name,value\n=CMD|'/c calc'!A1,evil\n"
+        result = _csv_to_html(raw)
+        assert "<script" not in result
+        # Formula cell text is present as literal text, not evaluated
+        assert "=CMD" in result
+
+    def test_html_injection_escaped(self):
+        raw = b'name,payload\nalpha,"<script>alert(1)</script>"\n'
+        result = _csv_to_html(raw)
+        assert "<script>" not in result
+        assert "&lt;script&gt;" in result
+
+    def test_table_structure(self):
+        raw = b"a,b\n1,2\n"
+        result = _csv_to_html(raw)
+        assert "<table>" in result
+        assert "<td>a</td>" in result
+        assert "<td>1</td>" in result
+
+    def test_empty_csv(self):
+        result = _csv_to_html(b"")
+        assert "<table>" in result  # empty table, no crash
+
+
+# ---------------------------------------------------------------------------
+# _xml_to_text
+# ---------------------------------------------------------------------------
+
+
+class TestXmlToText:
+    def test_extracts_text_nodes(self):
+        xml = b"<?xml version='1.0'?><root><a>Hello</a><b>World</b></root>"
+        result = _xml_to_text(xml)
+        assert "Hello" in result
+        assert "World" in result
+
+    def test_discards_tags(self):
+        xml = b"<root><item>text</item></root>"
+        result = _xml_to_text(xml)
+        assert "<item>" not in result
+        assert "<root>" not in result
+
+    def test_malformed_xml_fallback(self):
+        bad = b"this is not xml at all <<<<"
+        result = _xml_to_text(bad)
+        assert "this is not xml" in result
+
+    def test_xxe_blocked(self):
+        xxe = (
+            b"<?xml version='1.0'?>"
+            b"<!DOCTYPE foo [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]>"
+            b"<root>&xxe;</root>"
+        )
+        # defusedxml raises; fallback renders raw bytes — must not contain passwd contents
+        result = _xml_to_text(xxe)
+        assert "/root:" not in result
+
+
+# ---------------------------------------------------------------------------
+# pipeline — text format path (text_to_pdf mocked)
+# ---------------------------------------------------------------------------
+
+
+class TestProcessFileTextPath:
+    async def test_txt_file_routed_to_text_path(self, tmp_path, monkeypatch):
+        src = tmp_path / "source/notes.txt"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("Hello scrub")
+
+        def _fake_text_to_pdf(raw, fmt):
+            import os
+            import tempfile
+
+            import fitz
+
+            doc = fitz.open()
+            page = doc.new_page()
+            page.insert_text((72, 72), raw.decode("utf-8", errors="replace"))
+            fd, path = tempfile.mkstemp(suffix=".pdf")
+            os.close(fd)
+            doc.save(path)
+            doc.close()
+            return Path(path)
+
+        monkeypatch.setattr("scrub.pipeline.text_to_pdf", _fake_text_to_pdf)
+        monkeypatch.setattr(
+            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
+        )
+
+        result = await process_file(
+            rel_path=Path("notes.txt"),
+            source_dir=tmp_path / "source",
+            clean_dir=tmp_path / "clean",
+            quarantine_dir=tmp_path / "quarantine",
+            errors_dir=tmp_path / "errors",
+            socket_path="/dev/null",
+        )
+
+        assert result == "clean"
+        assert (tmp_path / "clean/notes.txt.page_001.png").exists()
+
+    async def test_csv_uses_sheet_naming(self, tmp_path, monkeypatch):
+        src = tmp_path / "source/data.csv"
+        src.parent.mkdir(parents=True, exist_ok=True)
+        src.write_text("a,b\n1,2\n")
+
+        def _fake_text_to_pdf(raw, fmt):
+            import os
+            import tempfile
+
+            import fitz
+
+            doc = fitz.open()
+            doc.new_page()
+            fd, path = tempfile.mkstemp(suffix=".pdf")
+            os.close(fd)
+            doc.save(path)
+            doc.close()
+            return Path(path)
+
+        monkeypatch.setattr("scrub.pipeline.text_to_pdf", _fake_text_to_pdf)
+        monkeypatch.setattr(
+            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
+        )
+
+        result = await process_file(
+            rel_path=Path("data.csv"),
+            source_dir=tmp_path / "source",
+            clean_dir=tmp_path / "clean",
+            quarantine_dir=tmp_path / "quarantine",
+            errors_dir=tmp_path / "errors",
+            socket_path="/dev/null",
+        )
+
+        assert result == "clean"
+        assert (tmp_path / "clean/data.csv.sheet_001.png").exists()

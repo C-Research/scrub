@@ -1,9 +1,13 @@
 import asyncio
+import csv
+import html
+import io
 import os
 import shutil
 import tempfile
 from pathlib import Path
 
+import defusedxml.ElementTree as _safe_et
 import fitz  # PyMuPDF
 
 # Macro security level 4 = no macros run
@@ -136,3 +140,85 @@ def rasterize_pdf(pdf_path: Path) -> list[tuple[bytes, int, int]]:
         return results
     finally:
         doc.close()
+
+
+# ---------------------------------------------------------------------------
+# Text-format renderer (weasyprint)
+# ---------------------------------------------------------------------------
+
+_HTML_WRAPPER = """\
+<!DOCTYPE html>
+<html><head><meta charset="utf-8">
+<style>body{{margin:1em;font-family:monospace;white-space:pre-wrap;word-break:break-all}}
+table{{border-collapse:collapse;font-family:sans-serif;font-size:0.85em}}
+td,th{{border:1px solid #ccc;padding:3px 6px}}</style>
+</head><body>{content}</body></html>"""
+
+
+def _block_external_fetches(url: str) -> dict:
+    """weasyprint url_fetcher — passes data: URIs, blocks everything else."""
+    if url.startswith("data:"):
+        import weasyprint
+
+        return weasyprint.default_url_fetcher(url)
+    raise ValueError(f"external fetch blocked: {url}")
+
+
+def _txt_to_html(text: str) -> str:
+    return _HTML_WRAPPER.format(content=html.escape(text))
+
+
+def _csv_to_html(raw: bytes) -> str:
+    text = raw.decode("utf-8", errors="replace")
+    reader = csv.reader(io.StringIO(text))
+    rows = list(reader)
+    cells = "".join(
+        "<tr>" + "".join(f"<td>{html.escape(cell)}</td>" for cell in row) + "</tr>"
+        for row in rows
+    )
+    content = f"<table>{cells}</table>"
+    return _HTML_WRAPPER.format(content=content)
+
+
+def _xml_to_text(raw: bytes) -> str:
+    try:
+        root = _safe_et.fromstring(raw)
+        text = "\n".join(t for t in root.itertext() if t.strip())
+    except Exception:
+        text = raw.decode("utf-8", errors="replace")
+    return _txt_to_html(text)
+
+
+def text_to_pdf(raw: bytes, fmt: str) -> Path:
+    """Convert a text-based file to PDF via weasyprint. Returns temp PDF path; caller deletes."""
+    if fmt == "csv":
+        markup = _csv_to_html(raw)
+    elif fmt == "xml":
+        markup = _xml_to_text(raw)
+    else:
+        # txt, html, htm — html/htm rendered directly; txt wrapped in <pre>
+        if fmt in ("html", "htm"):
+            markup = raw.decode("utf-8", errors="replace")
+        else:
+            markup = _txt_to_html(raw.decode("utf-8", errors="replace"))
+
+    try:
+        import weasyprint
+
+        pdf_bytes = weasyprint.HTML(
+            string=markup, url_fetcher=_block_external_fetches
+        ).write_pdf()
+    except ConversionError:
+        raise
+    except Exception as e:
+        raise ConversionError("TextRenderError", f"weasyprint failed: {e}")
+
+    fd, _pdf_dest = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    pdf_dest = Path(_pdf_dest)
+    try:
+        pdf_dest.write_bytes(pdf_bytes)
+    except Exception as e:
+        pdf_dest.unlink(missing_ok=True)
+        raise ConversionError("TextRenderError", f"PDF write failed: {e}")
+    return pdf_dest

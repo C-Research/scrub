@@ -1,0 +1,4 @@
+Hello, scrub.
+This is a plain text fixture file.
+It contains multiple lines of ASCII text.
+Line four.

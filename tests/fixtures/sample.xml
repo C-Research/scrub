@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<document>
+  <title>Sample XML</title>
+  <body>
+    <section>This is a fixture XML file for scrub text-extraction tests.</section>
+    <section>Second section with more text.</section>
+  </body>
+</document>

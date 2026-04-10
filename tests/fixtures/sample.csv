@@ -1,0 +1,5 @@
+name,value,notes
+alpha,1,normal cell
+beta,2,=CMD|'/c calc'!A1
+gamma,3,"<script>alert(1)</script>"
+delta,4,last row

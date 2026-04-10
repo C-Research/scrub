@@ -28,6 +28,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     clamdscan \
     # bsdtar (libarchive-tools) — used by the rarfile Python package for RAR extraction
     libarchive-tools \
+    # weasyprint runtime deps (Pango, Cairo, GDK-PixBuf for HTML/CSS → PDF rendering)
+    libpango-1.0-0 \
+    libpangocairo-1.0-0 \
+    libcairo2 \
+    libgdk-pixbuf-2.0-0 \
+    libharfbuzz-icu0 \
+    shared-mime-info \
     && rm -rf /var/lib/apt/lists/*
 
 # fontconfig substitution: map Windows CJK font names to installed equivalents

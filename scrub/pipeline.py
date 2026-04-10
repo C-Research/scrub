@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import fs, log, quarantine, sanitize
 from .clamav import scan_pngs
-from .converter import ConversionError, convert_to_pdf, rasterize_pdf
+from .converter import ConversionError, convert_to_pdf, rasterize_pdf, text_to_pdf
 
 
 def _env_int(name: str, default: int) -> int:
@@ -41,7 +41,8 @@ _MAGIC: list[tuple[bytes, str]] = [
 _ZIP_EXT_MAP = {".docx": "docx", ".pptx": "pptx", ".xlsx": "xlsx"}
 _OLE_EXT_MAP = {".doc": "doc", ".ppt": "ppt", ".xls": "xls"}
 _IMAGE_FORMATS = {"png", "jpg", "tiff", "bmp", "gif"}
-_OFFICE_FORMATS = {"pdf", "docx", "doc", "xlsx", "xls", "pptx", "ppt", "csv"}
+_OFFICE_FORMATS = {"pdf", "docx", "doc", "xlsx", "xls", "pptx", "ppt"}
+_TEXT_FORMATS = {"txt", "html", "htm", "xml", "csv"}
 
 _SUPPORTED_EXTENSIONS = {
     ".pdf",
@@ -59,7 +60,33 @@ _SUPPORTED_EXTENSIONS = {
     ".bmp",
     ".gif",
     ".csv",
+    ".txt",
+    ".html",
+    ".htm",
+    ".xml",
 }
+
+
+_UTF8_BOM = b"\xef\xbb\xbf"
+_HTML_SNIFF = (b"<!doctype html", b"<html", b"<head", b"<body")
+
+
+def _sniff_text_format(header: bytes, ext: str) -> str | None:
+    """Return a text format string if the header/extension match, else None."""
+    sniff = header.lstrip(_UTF8_BOM).lower()
+    if any(sniff.startswith(marker) for marker in _HTML_SNIFF):
+        return "html"
+    if sniff.startswith(b"<?xml"):
+        return "xml"
+    if ext == ".html" or ext == ".htm":
+        return "html"
+    if ext == ".xml":
+        return "xml"
+    if ext == ".txt":
+        return "txt"
+    if ext == ".csv":
+        return "csv"
+    return None
 
 
 def detect_format(header: bytes, filename: str) -> str:
@@ -71,8 +98,9 @@ def detect_format(header: bytes, filename: str) -> str:
             if fmt == "ole":
                 return _OLE_EXT_MAP.get(ext, "doc")
             return fmt
-    if ext == ".csv":
-        return "csv"
+    text_fmt = _sniff_text_format(header[:512], ext)
+    if text_fmt:
+        return text_fmt
     return "unknown"
 
 
@@ -146,7 +174,7 @@ async def process_file(
     fmt = detect_format(raw[:16], rel_path.name)
     log.start(rel_str, fmt)
 
-    if fmt not in _IMAGE_FORMATS and fmt not in _OFFICE_FORMATS:
+    if fmt not in _IMAGE_FORMATS and fmt not in _OFFICE_FORMATS and fmt not in _TEXT_FORMATS:
         await _error(
             rel_str,
             errors_dir,
@@ -165,6 +193,9 @@ async def process_file(
         if fmt in _IMAGE_FORMATS:
             log.debug(rel_str, "PROCESS", "path=image")
             pages = await _process_image(raw, fmt, scan_dir)
+        elif fmt in _TEXT_FORMATS:
+            log.debug(rel_str, "PROCESS", "path=text  step=weasyprint→pdf")
+            pages = await _process_text_document(raw, fmt, scan_dir)
         else:
             log.debug(rel_str, "PROCESS", "path=document  step=libreoffice→pdf")
             pages = await _process_document(raw, fmt, scan_dir, timeout)
@@ -342,6 +373,47 @@ async def _process_document(
         return pages
     finally:
         tmp_input.unlink(missing_ok=True)
+        if pdf_path and pdf_path.exists():
+            pdf_path.unlink(missing_ok=True)
+
+
+async def _process_text_document(
+    raw: bytes, fmt: str, scan_dir: Path
+) -> list[bytes] | ConversionError:
+    loop = asyncio.get_running_loop()
+    pdf_path = None
+    try:
+        try:
+            pdf_path = await loop.run_in_executor(None, text_to_pdf, raw, fmt)
+        except ConversionError:
+            raise
+        except Exception as e:
+            raise ConversionError("TextRenderError", str(e))
+
+        try:
+            pixel_pages = await loop.run_in_executor(None, rasterize_pdf, pdf_path)
+        except ConversionError:
+            raise
+        except Exception as e:
+            raise ConversionError("PyMuPDFError", str(e))
+
+        pages = []
+        for i, (rgb_bytes, w, h) in enumerate(pixel_pages):
+            try:
+                png_bytes = await loop.run_in_executor(
+                    None, sanitize.reencode_png, rgb_bytes, w, h
+                )
+            except Exception as e:
+                raise ConversionError(
+                    "PillowEncodeError", f"page {i + 1} re-encode failed: {e}"
+                )
+
+            scan_path = scan_dir / f"page_{i + 1:03d}.png"
+            await loop.run_in_executor(None, scan_path.write_bytes, png_bytes)
+            pages.append(png_bytes)
+
+        return pages
+    finally:
         if pdf_path and pdf_path.exists():
             pdf_path.unlink(missing_ok=True)
 
