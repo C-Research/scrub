@@ -7,6 +7,28 @@ from typing import AsyncIterator
 import aiofiles
 
 
+def _name_max() -> int:
+    try:
+        return os.pathconf("/", "PC_NAME_MAX")
+    except (AttributeError, ValueError):
+        return 255  # Windows fallback
+
+
+def _cap_filename(stem: str, suffix: str) -> str:
+    """Return stem+suffix truncating stem so the total fits within NAME_MAX bytes.
+
+    Truncation respects UTF-8 byte boundaries.  The full suffix (e.g.
+    '.docx.page_001.png', '.xls.json') is always preserved unchanged.
+    """
+    limit = _name_max()
+    suffix_bytes = suffix.encode("utf-8")
+    stem_limit = limit - len(suffix_bytes)
+    stem_bytes = stem.encode("utf-8")
+    if len(stem_bytes) <= stem_limit:
+        return stem + suffix
+    return stem_bytes[:stem_limit].decode("utf-8", errors="ignore") + suffix
+
+
 def is_os_artifact(name: str) -> bool:
     """True for OS-generated junk that should never be processed as documents.
 
@@ -62,7 +84,10 @@ def derive_output_paths(
     prefix = "sheet" if is_xlsx else "page"
     stem = rel_path.name.replace("/", "_")
     base_dir = clean_dir / rel_path.parent
-    return [base_dir / f"{stem}.{prefix}_{i + 1:03d}.png" for i in range(page_count)]
+    return [
+        base_dir / _cap_filename(stem, f".{prefix}_{i + 1:03d}.png")
+        for i in range(page_count)
+    ]
 
 
 def derive_txt_output_path(
@@ -72,7 +97,7 @@ def derive_txt_output_path(
 ) -> Path:
     stem = rel_path.name.replace("/", "_")
     base_dir = clean_dir / rel_path.parent
-    return base_dir / f"{stem}.txt"
+    return base_dir / _cap_filename(stem, ".txt")
 
 
 async def write_txt(path: Path, text: str) -> None:
@@ -90,7 +115,7 @@ async def write_png(path: Path, data: bytes) -> None:
 async def write_quarantine_manifest(
     quarantine_dir: Path, rel_path: Path, manifest: dict
 ) -> None:
-    out = quarantine_dir / (str(rel_path) + ".json")
+    out = quarantine_dir / rel_path.parent / _cap_filename(rel_path.name, ".json")
     out.parent.mkdir(parents=True, exist_ok=True)
     async with aiofiles.open(out, "w", encoding="utf-8") as f:
         await f.write(json.dumps(manifest, indent=2))
@@ -99,7 +124,7 @@ async def write_quarantine_manifest(
 async def write_error_manifest(
     errors_dir: Path, rel_path: Path, manifest: dict
 ) -> None:
-    out = errors_dir / (str(rel_path) + ".json")
+    out = errors_dir / rel_path.parent / _cap_filename(rel_path.name, ".json")
     out.parent.mkdir(parents=True, exist_ok=True)
     async with aiofiles.open(out, "w", encoding="utf-8") as f:
         await f.write(json.dumps(manifest, indent=2))

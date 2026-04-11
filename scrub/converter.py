@@ -11,6 +11,20 @@ from pathlib import Path
 import defusedxml.ElementTree as _safe_et
 import fitz  # PyMuPDF
 
+# Semaphore capping concurrent LibreOffice processes. Multiple simultaneous
+# LO instances contend over system resources (pipes, process table, gVisor
+# limits) and fail with EAGAIN. Configurable via SCRUB_LO_WORKERS; default 1.
+_lo_sem: asyncio.Semaphore | None = None
+
+
+def _lo_semaphore() -> asyncio.Semaphore:
+    global _lo_sem
+    if _lo_sem is None:
+        limit = max(1, int(os.environ.get("SCRUB_LO_WORKERS", "1") or "1"))
+        _lo_sem = asyncio.Semaphore(limit)
+    return _lo_sem
+
+
 # Macro security level 4 = no macros run
 _MACRO_SECURITY_XCU = """\
 <?xml version="1.0" encoding="UTF-8"?>
@@ -67,6 +81,11 @@ async def convert_to_pdf(
     timeout: int = 60,
 ) -> Path:
     """Convert office document to PDF via LibreOffice. Returns path to temp PDF; caller deletes it."""
+    async with _lo_semaphore():
+        return await _convert_to_pdf(input_path, fmt, timeout)
+
+
+async def _convert_to_pdf(input_path: Path, fmt: str, timeout: int) -> Path:
     profile_dir = Path(tempfile.mkdtemp(prefix="lo_profile_"))
     out_dir = Path(tempfile.mkdtemp(prefix="lo_out_"))
 
@@ -123,6 +142,11 @@ async def convert_to_txt(
     timeout: int = 60,
 ) -> str:
     """Convert office document to plain text via LibreOffice. Returns text content as a string."""
+    async with _lo_semaphore():
+        return await _convert_to_txt(input_path, fmt, timeout)
+
+
+async def _convert_to_txt(input_path: Path, fmt: str, timeout: int) -> str:
     profile_dir = Path(tempfile.mkdtemp(prefix="lo_profile_"))
     out_dir = Path(tempfile.mkdtemp(prefix="lo_out_"))
 
