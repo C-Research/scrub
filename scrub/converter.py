@@ -129,13 +129,20 @@ async def convert_to_txt(
     try:
         _setup_lo_profile(profile_dir)
 
+        _CALC_FORMATS = {"xls", "xlsx"}
+        convert_to_arg = (
+            "txt:Text - txt - csv (StarCalc)"
+            if fmt in _CALC_FORMATS
+            else "txt:Text"
+        )
+
         cmd = [
             "libreoffice",
             "--headless",
             "--norestore",
             f"-env:UserInstallation=file://{profile_dir}",
             "--convert-to",
-            "txt:Text",
+            convert_to_arg,
             "--outdir",
             str(out_dir),
         ]
