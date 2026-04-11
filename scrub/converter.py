@@ -13,14 +13,25 @@ import fitz  # PyMuPDF
 
 # Semaphore capping concurrent LibreOffice processes. Multiple simultaneous
 # LO instances contend over system resources (pipes, process table, gVisor
-# limits) and fail with EAGAIN. Configurable via SCRUB_LO_WORKERS; default 1.
+# limits) and fail with EAGAIN. Default: half the CPU count (min 1).
+# Override with SCRUB_LO_WORKERS env var.
 _lo_sem: asyncio.Semaphore | None = None
+
+# Retry up to this many times on EAGAIN before surfacing the error.
+_LO_RETRIES = 3
+_LO_RETRY_BASE = 0.5  # seconds; doubled each attempt
+_EAGAIN_PHRASES = ("resource temporarily unavailable", "try again later", "eagain")
+
+
+def _is_eagain(e: "ConversionError") -> bool:
+    return any(p in e.detail.lower() for p in _EAGAIN_PHRASES)
 
 
 def _lo_semaphore() -> asyncio.Semaphore:
     global _lo_sem
     if _lo_sem is None:
-        limit = max(1, int(os.environ.get("SCRUB_LO_WORKERS", "1") or "1"))
+        default = max(1, (os.cpu_count() or 2) // 2)
+        limit = max(1, int(os.environ.get("SCRUB_LO_WORKERS", str(default)) or str(default)))
         _lo_sem = asyncio.Semaphore(limit)
     return _lo_sem
 
@@ -81,8 +92,17 @@ async def convert_to_pdf(
     timeout: int = 60,
 ) -> Path:
     """Convert office document to PDF via LibreOffice. Returns path to temp PDF; caller deletes it."""
-    async with _lo_semaphore():
-        return await _convert_to_pdf(input_path, fmt, timeout)
+    for attempt in range(_LO_RETRIES):
+        async with _lo_semaphore():
+            try:
+                return await _convert_to_pdf(input_path, fmt, timeout)
+            except ConversionError as e:
+                if _is_eagain(e) and attempt < _LO_RETRIES - 1:
+                    pass  # release semaphore, back off, retry
+                else:
+                    raise
+        await asyncio.sleep(_LO_RETRY_BASE * (2**attempt))
+    raise ConversionError("LibreOfficeError", "LibreOffice resource unavailable after retries")
 
 
 async def _convert_to_pdf(input_path: Path, fmt: str, timeout: int) -> Path:
@@ -142,8 +162,17 @@ async def convert_to_txt(
     timeout: int = 60,
 ) -> str:
     """Convert office document to plain text via LibreOffice. Returns text content as a string."""
-    async with _lo_semaphore():
-        return await _convert_to_txt(input_path, fmt, timeout)
+    for attempt in range(_LO_RETRIES):
+        async with _lo_semaphore():
+            try:
+                return await _convert_to_txt(input_path, fmt, timeout)
+            except ConversionError as e:
+                if _is_eagain(e) and attempt < _LO_RETRIES - 1:
+                    pass
+                else:
+                    raise
+        await asyncio.sleep(_LO_RETRY_BASE * (2**attempt))
+    raise ConversionError("LibreOfficeError", "LibreOffice resource unavailable after retries")
 
 
 async def _convert_to_txt(input_path: Path, fmt: str, timeout: int) -> str:
