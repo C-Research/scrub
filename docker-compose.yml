@@ -1,24 +1,6 @@
 services:
-  clamav:
-    image: clamav/clamav:latest
-    platform: linux/amd64
-    restart: unless-stopped
-    volumes:
-      - clamav-socket:/run/clamav
-      - clamav-sigs:/var/lib/clamav
-      - ./docker/clamd.conf:/etc/clamav/clamd.conf:ro
-      - clamav-logs:/var/log/clamav
-    healthcheck:
-      # Poll the clamd socket — healthy when daemon responds
-      test: [ "CMD", "clamdscan", "--config-file=/etc/clamav/clamd.conf", "--ping=5" ]
-      interval: 10s
-      timeout: 5s
-      retries: 12 # up to 2 minutes for initial signature load
-      start_period: 60s
-
   scrub:
     build: .
-    # runtime: runsc        # gVisor — requires gVisor installed on Linux host
     network_mode: none # no network egress
     cap_drop:
       - ALL
@@ -38,14 +20,14 @@ services:
         source: ${SCRUB_SOURCE:-./data/source}
         target: /data/source
         read_only: true
+      # Extracts: archive members extracted here (source may be read-only)
+      - type: bind
+        source: ${SCRUB_EXTRACTS:-./data/extracts}
+        target: /data/extracts
       # Clean output
       - type: bind
         source: ${SCRUB_CLEAN:-./data/clean}
         target: /data/clean
-      # Quarantine manifests (ClamAV detections only)
-      - type: bind
-        source: ${SCRUB_QUARANTINE:-./data/quarantine}
-        target: /data/quarantine
       # Error manifests (processing failures)
       - type: bind
         source: ${SCRUB_ERRORS:-./data/errors}
@@ -54,16 +36,3 @@ services:
       - type: bind
         source: ${SCRUB_LOGS:-./data/logs}
         target: /var/log/scrub
-      # ClamAV socket — connecting to a Unix socket requires write permission on the file
-      - clamav-socket:/run/clamav
-    depends_on:
-      clamav:
-        condition: service_healthy
-    # GID 101 = clamav group in the clamav/clamav image (allows socket access)
-    group_add:
-      - "101"
-
-volumes:
-  clamav-socket:
-  clamav-sigs:
-  clamav-logs:

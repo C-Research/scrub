@@ -1,13 +1,13 @@
 import asyncio
+import hashlib
 import os
-import shutil
 import sys
 import tempfile
 import traceback
+from datetime import datetime, timezone
 from pathlib import Path
 
-from . import fs, log, quarantine, sanitize
-from .clamav import scan_pngs
+from . import fs, log, sanitize
 from .converter import ConversionError, convert_to_pdf, rasterize_pdf, text_to_pdf
 
 
@@ -108,12 +108,10 @@ async def process_file(
     rel_path: Path,
     source_dir: Path,
     clean_dir: Path,
-    quarantine_dir: Path,
     errors_dir: Path,
-    socket_path: str,
     timeout: int = 60,
 ) -> str:
-    """Process one file. Returns 'clean', 'quarantine', or 'error'."""
+    """Process one file. Returns 'clean', 'skipped', or 'error'."""
     src = source_dir / rel_path
     rel_str = str(rel_path)
 
@@ -167,7 +165,7 @@ async def process_file(
 
     # Read file and hash
     raw = src.read_bytes()
-    file_sha256 = quarantine.sha256(raw)
+    file_sha256 = hashlib.sha256(raw).hexdigest()
     log.debug(rel_str, "READ", f"size={file_size}  sha256={file_sha256[:16]}…")
 
     # Format detection from magic bytes
@@ -188,17 +186,16 @@ async def process_file(
         )
         return "error"
 
-    scan_dir = Path(tempfile.mkdtemp(prefix="scrub_scan_"))
     try:
         if fmt in _IMAGE_FORMATS:
             log.debug(rel_str, "PROCESS", "path=image")
-            pages = await _process_image(raw, fmt, scan_dir)
+            pages = await _process_image(raw, fmt)
         elif fmt in _TEXT_FORMATS:
             log.debug(rel_str, "PROCESS", "path=text  step=weasyprint→pdf")
-            pages = await _process_text_document(raw, fmt, scan_dir)
+            pages = await _process_text_document(raw, fmt)
         else:
             log.debug(rel_str, "PROCESS", "path=document  step=libreoffice→pdf")
-            pages = await _process_document(raw, fmt, scan_dir, timeout)
+            pages = await _process_document(raw, fmt, timeout)
 
         if isinstance(pages, ConversionError):
             await _error(
@@ -215,48 +212,6 @@ async def process_file(
             return "error"
 
         log.debug(rel_str, "PROCESS", f"step=rasterized  pages={len(pages)}")
-
-        # ClamAV scan — all pages before any write
-        scan_paths = [scan_dir / f"page_{i + 1:03d}.png" for i in range(len(pages))]
-        log.debug(rel_str, "SCAN", f"pages={len(scan_paths)}")
-        result = await scan_pngs(scan_paths, socket_path)
-
-        if not result.clean:
-            if result.error:
-                log.debug(rel_str, "SCAN", f"result=error  detail={result.error}")
-                await _quarantine(
-                    rel_str,
-                    quarantine_dir,
-                    rel_path,
-                    fmt,
-                    "ClamAVError",
-                    result.error,
-                    None,
-                    file_size,
-                    file_sha256,
-                )
-            else:
-                log.debug(
-                    rel_str,
-                    "SCAN",
-                    f"result=threat  virus={result.virus_name}  file={result.scanned_file}",
-                )
-                await _quarantine(
-                    rel_str,
-                    quarantine_dir,
-                    rel_path,
-                    fmt,
-                    "ClamAVDetection",
-                    f"ClamAV detected threat in {result.scanned_file}",
-                    None,
-                    file_size,
-                    file_sha256,
-                    virus_name=result.virus_name,
-                    scanned_file=result.scanned_file,
-                )
-            return "quarantine"
-
-        log.debug(rel_str, "SCAN", "result=clean")
 
         # Write to clean dir
         is_xlsx = fmt in ("xlsx", "xls", "csv")
@@ -298,13 +253,9 @@ async def process_file(
             file_sha256,
         )
         return "error"
-    finally:
-        shutil.rmtree(scan_dir, ignore_errors=True)
 
 
-async def _process_image(
-    raw: bytes, fmt: str, scan_dir: Path
-) -> list[bytes] | ConversionError:
+async def _process_image(raw: bytes, fmt: str) -> list[bytes] | ConversionError:
     loop = asyncio.get_running_loop()
     fd, _tmp = tempfile.mkstemp(suffix=f".{fmt}")
     os.close(fd)
@@ -320,18 +271,11 @@ async def _process_image(
     finally:
         tmp.unlink(missing_ok=True)
 
-    # Write to scan_dir for ClamAV
-    scan_path = scan_dir / "page_001.png"
-    try:
-        await loop.run_in_executor(None, scan_path.write_bytes, png_bytes)
-    except Exception as e:
-        return ConversionError("PillowEncodeError", f"PNG write failed: {e}")
-
     return [png_bytes]
 
 
 async def _process_document(
-    raw: bytes, fmt: str, scan_dir: Path, timeout: int
+    raw: bytes, fmt: str, timeout: int
 ) -> list[bytes] | ConversionError:
     loop = asyncio.get_running_loop()
     fd, _tmp_input = tempfile.mkstemp(suffix=f".{fmt}")
@@ -365,9 +309,6 @@ async def _process_document(
                 raise ConversionError(
                     "PillowEncodeError", f"page {i + 1} re-encode failed: {e}"
                 )
-
-            scan_path = scan_dir / f"page_{i + 1:03d}.png"
-            await loop.run_in_executor(None, scan_path.write_bytes, png_bytes)
             pages.append(png_bytes)
 
         return pages
@@ -377,9 +318,7 @@ async def _process_document(
             pdf_path.unlink(missing_ok=True)
 
 
-async def _process_text_document(
-    raw: bytes, fmt: str, scan_dir: Path
-) -> list[bytes] | ConversionError:
+async def _process_text_document(raw: bytes, fmt: str) -> list[bytes] | ConversionError:
     loop = asyncio.get_running_loop()
     pdf_path = None
     try:
@@ -407,43 +346,12 @@ async def _process_text_document(
                 raise ConversionError(
                     "PillowEncodeError", f"page {i + 1} re-encode failed: {e}"
                 )
-
-            scan_path = scan_dir / f"page_{i + 1:03d}.png"
-            await loop.run_in_executor(None, scan_path.write_bytes, png_bytes)
             pages.append(png_bytes)
 
         return pages
     finally:
         if pdf_path and pdf_path.exists():
             pdf_path.unlink(missing_ok=True)
-
-
-async def _quarantine(
-    rel_str: str,
-    quarantine_dir: Path,
-    rel_path: Path,
-    fmt: str,
-    error_type: str,
-    error_detail: str,
-    stack_trace: str | None,
-    file_size: int,
-    file_sha256: str,
-    virus_name: str | None = None,
-    scanned_file: str | None = None,
-) -> None:
-    manifest = quarantine.build_manifest(
-        input_path=rel_str,
-        format_detected=fmt,
-        error_type=error_type,
-        error_detail=error_detail,
-        stack_trace=stack_trace,
-        file_size_bytes=file_size,
-        file_sha256=file_sha256,
-        virus_name=virus_name,
-        scanned_file=scanned_file,
-    )
-    await fs.write_quarantine_manifest(quarantine_dir, rel_path, manifest)
-    log.quarantine(rel_str, error_type, error_detail[:120])
 
 
 async def _error(
@@ -457,14 +365,15 @@ async def _error(
     file_size: int,
     file_sha256: str,
 ) -> None:
-    manifest = quarantine.build_manifest(
-        input_path=rel_str,
-        format_detected=fmt,
-        error_type=error_type,
-        error_detail=error_detail,
-        stack_trace=stack_trace,
-        file_size_bytes=file_size,
-        file_sha256=file_sha256,
-    )
+    manifest = {
+        "input_path": rel_str,
+        "timestamp": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "format_detected": fmt,
+        "error_type": error_type,
+        "error_detail": error_detail,
+        "stack_trace": stack_trace,
+        "file_size_bytes": file_size,
+        "sha256": file_sha256,
+    }
     await fs.write_error_manifest(errors_dir, rel_path, manifest)
     log.error(rel_str, error_type, error_detail[:120])

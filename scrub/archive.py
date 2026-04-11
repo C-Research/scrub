@@ -13,16 +13,29 @@ from . import log
 rarfile.UNRAR_TOOL = "/usr/bin/bsdtar"
 
 
+def _archive_stem(p: Path) -> str:
+    name = p.name
+    if name.endswith(".tar.gz"):
+        return name[:-7]
+    if name.endswith(".tgz"):
+        return name[:-4]
+    return p.stem
+
+
 async def expand_archives(
     source_dir: Path,
+    extracts_dir: Path,
     max_file_bytes: int,
     max_members: int,
     max_total_bytes: int,
 ) -> int:
-    """Expand .zip, .rar, .tar.gz, .tgz, and .gz archives into source_dir in-place.
+    """Expand .zip, .rar, .tar.gz, .tgz, and .gz archives into extracts_dir.
 
-    Collects all archives first, then expands each once — extracted archives
-    are not re-expanded. Returns the count of archives processed.
+    Extracts into extracts_dir/<source-relative-parent>/<archive-stem>/<member-path>.
+    For single-file .gz, extracts to extracts_dir/<source-relative-parent>/<stem>.
+    Checks first non-dir member of each archive against source_dir as a sentinel:
+    if the first member exists in source, the archive is assumed already extracted and skipped.
+    Returns the count of archives processed.
     """
     loop = asyncio.get_running_loop()
     archives = await loop.run_in_executor(
@@ -38,14 +51,33 @@ async def expand_archives(
         archive_str = str(archive_path)
         try:
             name = archive_path.name
+            rel_parent = archive_path.relative_to(source_dir).parent
+            stem = _archive_stem(archive_path)
             if name.endswith(".tar.gz") or name.endswith(".tgz"):
-                await _expand_targz(archive_path, max_file_bytes, max_members, max_total_bytes)
+                if _targz_first_member_in_source(archive_path, source_dir):
+                    log.debug(archive_str, "ARCHIVE_SKIP", "already in source")
+                    continue
+                dest_dir = extracts_dir / rel_parent / stem
+                await _expand_targz(archive_path, dest_dir, max_file_bytes, max_members, max_total_bytes)
             elif archive_path.suffix.lower() == ".zip":
-                await _expand_zip(archive_path, max_file_bytes, max_members, max_total_bytes)
+                if _zip_first_member_in_source(archive_path, source_dir):
+                    log.debug(archive_str, "ARCHIVE_SKIP", "already in source")
+                    continue
+                dest_dir = extracts_dir / rel_parent / stem
+                await _expand_zip(archive_path, dest_dir, max_file_bytes, max_members, max_total_bytes)
             elif archive_path.suffix.lower() == ".rar":
-                await _expand_rar(archive_path, max_file_bytes, max_members, max_total_bytes)
+                if _rar_first_member_in_source(archive_path, source_dir):
+                    log.debug(archive_str, "ARCHIVE_SKIP", "already in source")
+                    continue
+                dest_dir = extracts_dir / rel_parent / stem
+                await _expand_rar(archive_path, dest_dir, max_file_bytes, max_members, max_total_bytes)
             else:
-                await _expand_gz(archive_path, max_file_bytes)
+                # .gz single-file: sentinel is source_dir / rel_parent / archive_path.stem
+                if (source_dir / rel_parent / archive_path.stem).exists():
+                    log.debug(archive_str, "ARCHIVE_SKIP", "already in source")
+                    continue
+                dest_dir = extracts_dir / rel_parent
+                await _expand_gz(archive_path, dest_dir, max_file_bytes)
             count += 1
         except Exception as e:
             log.debug(archive_str, "ARCHIVE_ERROR", str(e))
@@ -74,14 +106,62 @@ def _safe_dest(member_path_str: str, dest_dir: Path) -> Path | None:
     return dest
 
 
+def _zip_first_member_in_source(archive_path: Path, source_dir: Path) -> bool:
+    """True if the first non-dir member of the ZIP already exists in source_dir."""
+    try:
+        with zipfile.ZipFile(archive_path, "r") as zf:
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                p = Path(info.filename)
+                if p.is_absolute() or ".." in p.parts:
+                    continue
+                return (source_dir / p).exists()
+    except Exception:
+        pass
+    return False
+
+
+def _targz_first_member_in_source(archive_path: Path, source_dir: Path) -> bool:
+    """True if the first non-dir, non-symlink member of the tar.gz exists in source_dir."""
+    try:
+        with tarfile.open(archive_path, mode="r:gz") as tf:
+            for info in tf.getmembers():
+                if info.isdir() or info.issym() or info.islnk():
+                    continue
+                p = Path(info.name)
+                if p.is_absolute() or ".." in p.parts:
+                    continue
+                return (source_dir / p).exists()
+    except Exception:
+        pass
+    return False
+
+
+def _rar_first_member_in_source(archive_path: Path, source_dir: Path) -> bool:
+    """True if the first non-dir, non-symlink member of the RAR exists in source_dir."""
+    try:
+        with rarfile.RarFile(archive_path, "r") as rf:
+            for info in rf.infolist():
+                if info.is_dir() or info.is_symlink():
+                    continue
+                p = Path(info.filename)
+                if p.is_absolute() or ".." in p.parts:
+                    continue
+                return (source_dir / p).exists()
+    except Exception:
+        pass
+    return False
+
+
 async def _expand_targz(
     archive_path: Path,
+    dest_dir: Path,
     max_file_bytes: int,
     max_members: int,
     max_total_bytes: int,
 ) -> None:
     archive_str = str(archive_path)
-    dest_dir = archive_path.parent
     with tarfile.open(archive_path, mode="r:gz") as tf:
         total_bytes = 0
         for i, info in enumerate(tf.getmembers()):
@@ -118,11 +198,11 @@ async def _expand_targz(
 
 async def _expand_gz(
     archive_path: Path,
+    dest_dir: Path,
     max_file_bytes: int,
 ) -> None:
     archive_str = str(archive_path)
-    # Strip .gz to get the output filename
-    dest = archive_path.parent / archive_path.stem
+    dest = dest_dir / archive_path.stem
     if dest.exists():
         log.debug(archive_str, "ARCHIVE_SKIP", f"already exists: {dest.name}")
         return
@@ -150,12 +230,12 @@ async def _expand_gz(
 
 async def _expand_zip(
     archive_path: Path,
+    dest_dir: Path,
     max_file_bytes: int,
     max_members: int,
     max_total_bytes: int,
 ) -> None:
     archive_str = str(archive_path)
-    dest_dir = archive_path.parent
     with zipfile.ZipFile(archive_path, "r") as zf:
         total_bytes = 0
         for i, info in enumerate(zf.infolist()):
@@ -190,12 +270,12 @@ async def _expand_zip(
 
 async def _expand_rar(
     archive_path: Path,
+    dest_dir: Path,
     max_file_bytes: int,
     max_members: int,
     max_total_bytes: int,
 ) -> None:
     archive_str = str(archive_path)
-    dest_dir = archive_path.parent
     with rarfile.RarFile(archive_path, "r") as rf:
         total_bytes = 0
         for i, info in enumerate(rf.infolist()):

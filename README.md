@@ -1,6 +1,6 @@
 # scrub
 
-CDR (Content Disarm and Reconstruction) tool. Converts PDF, office documents and images to sanitized PNGs by re-encoding through a pixel-level pipeline. Every input is assumed adversarially crafted. Output PNGs are scanned with ClamAV just to make sure everything is clean. Applies some TLC to your infected files telling malware:
+CDR (Content Disarm and Reconstruction) tool. Converts PDF, office documents and images to sanitized PNGs by re-encoding through a pixel-level pipeline. Every input is assumed adversarially crafted. Applies some TLC to your infected files telling malware:
 
 So no, I don't want your number
 No, I don't want to give you mine and
@@ -9,7 +9,7 @@ No, I don't want none of your time
 
 **Supported formats:** PDF, DOCX, DOC, XLSX, XLS, PPTX, PPT, CSV, PNG, JPG, TIFF, BMP, GIF, ZIP, RAR, GZ, TAR.GZ, TGZ
 
-**Pipeline:** archives expanded → file → magic-byte detection → LibreOffice → PDF → PyMuPDF → raw pixels → Pillow re-encode → ClamAV scan → clean PNG
+**Pipeline:** archives expanded → file → magic-byte detection → LibreOffice → PDF → PyMuPDF → raw pixels → Pillow re-encode → clean PNG
 
 ## Requirements
 
@@ -22,47 +22,41 @@ No, I don't want none of your time
 
 Follow the [gVisor installation docs](https://gvisor.dev/docs/user_guide/install/) to install `runsc` and register it with Docker.
 
-Two scrub-specific requirements when configuring the runtime in `daemon.json`:
-- `--host-uds=open` is required. The ClamAV socket directory must be a **bind mount** (not a named Docker volume) — see `docker-compose.yml`. gVisor's gofer proxy resolves host paths for bind mounts, which is what lets `--host-uds=open` forward the `connect()` syscall to the real host-side socket. Named volumes go through a different gofer code path that doesn't support the `ConnectAt` RPC, so the socket file is visible inside the sandbox but connections fail.
+One scrub-specific requirement when configuring the runtime in `daemon.json`:
 - On bare metal with KVM available, use `runsc-kvm` (hardware virtualisation) rather than `runsc` (ptrace/systrap) — significantly faster for LibreOffice workloads. Change the `runtime:` line in `docker-compose.yml` if KVM isn't available.
 
 ### 2. Build the image
 
-```bash
-docker compose build
-```
+`docker-compose.yml` is the base config (volumes, caps, network isolation). `docker-compose.runsc.yml` overlays the gVisor runtime — omit it to run under the default `runc` (useful for CI or machines without gVisor installed).
 
-ClamAV signature download happens at first run, not at build time.
+```bash
+docker compose -f docker-compose.yml -f docker-compose.runsc.yml build
+```
 
 ## Running
 
 ### Prepare directories
 
 ```bash
-mkdir -p data/source data/clean data/quarantine data/logs data/clamav-socket
-chmod 1777 data/clamav-socket
+mkdir -p data/source data/extracts data/clean data/errors data/logs
 ```
 
-The `chmod 1777` on `data/clamav-socket` is required: the ClamAV container runs as UID 100 (clamav user) and needs write access to create the socket file. The sticky bit prevents other processes from deleting the socket.
-
-Place input files in `data/source/`. Subdirectory structure is preserved in output. ZIP and RAR archives are automatically expanded before processing — members are extracted alongside the archive in the source directory.
+Place input files in `data/source/`. Source is mounted read-only — scrub never writes to it. ZIP, RAR, GZ, TAR.GZ, and TGZ archives are automatically expanded before processing — members are extracted into `data/extracts/` (mirroring the source subdirectory structure, scoped under the archive name). If the first member of an archive already exists in source, the archive is assumed already expanded and skipped.
 
 ### Start
 
 ```bash
-docker compose up
+docker compose -f docker-compose.yml -f docker-compose.runsc.yml up
 ```
-
-On first run, the ClamAV sidecar downloads virus signatures (~300 MB) before `scrub` starts processing. This takes 1–3 minutes. Subsequent runs use the cached `clamav-sigs` volume and start in seconds.
-
-`scrub` waits for ClamAV to be healthy before processing any files (`depends_on: condition: service_healthy`).
 
 ### Output
 
 | Directory | Contents |
 |---|---|
+| `data/source/` | Input files (read-only mount) |
+| `data/extracts/` | Archive members extracted from source |
 | `data/clean/` | Sanitized PNGs, subdirectory structure mirrored from source |
-| `data/quarantine/` | JSON manifests for rejected files |
+| `data/errors/` | JSON manifests for processing failures |
 | `data/logs/` | Structured log file (`scrub.log`) |
 
 Each input file produces one PNG per page (documents) or one PNG (images). Output filenames embed the original filename:
@@ -73,23 +67,9 @@ Each input file produces one PNG per page (documents) or one PNG (images). Outpu
 
 Files with existing clean output are skipped on re-runs — only new or previously unprocessed files are cleaned.
 
-### Quarantine manifests
+### Error manifests
 
-Files that cannot be safely converted are quarantined — never written to the clean directory. A JSON manifest is written to `data/quarantine/` at the same relative path as the source file:
-
-```json
-{
-  "input_path": "invoices/q1.xlsx",
-  "format_detected": "xlsx",
-  "error_type": "ClamAVDetection",
-  "error_detail": "Virus detected",
-  "virus_name": "Win.Exploit.CVE-2024-1234",
-  "scanned_file": "page_001.png",
-  "file_size_bytes": 204800,
-  "sha256": "a3f2...",
-  "timestamp": "2026-04-09T14:23:01Z"
-}
-```
+Files that fail processing have a JSON manifest written to `data/errors/` at the same relative path as the source file.
 
 `error_type` values:
 
@@ -103,12 +83,10 @@ Files that cannot be safely converted are quarantined — never written to the c
 | `EmptyDocument` | PDF produced zero pages |
 | `ImageDecodeError` | Pillow couldn't decode the image |
 | `PillowEncodeError` | Pillow couldn't re-encode to PNG |
-| `ClamAVDetection` | ClamAV found a threat |
-| `ClamAVError` | ClamAV scan failed (treated as detection) |
 
 ## Tuning
 
-Environment variables (set in shell before `docker compose up`, or edit `docker-compose.yml`):
+Environment variables (set in shell before running, or edit `docker-compose.yml`):
 
 | Variable | Default | Description |
 |---|---|---|
@@ -119,18 +97,17 @@ Environment variables (set in shell before `docker compose up`, or edit `docker-
 | `SCRUB_MAX_ARCHIVE_TOTAL_MB` | `500` | Max total uncompressed size per archive (MB) |
 
 ```bash
-SCRUB_WORKERS=4 SCRUB_TIMEOUT=120 docker compose up
+SCRUB_WORKERS=4 SCRUB_TIMEOUT=120 docker compose -f docker-compose.yml -f docker-compose.runsc.yml up
 ```
 
 ## Verification
 
-Smoke test with an EICAR test file (detects as virus, should produce a quarantine manifest, not crash):
+Smoke test — process a plain image and verify output lands in `data/clean/`:
 
 ```bash
-# Download a benign EICAR Word macro test doc
-cp eicar-standard-antivirus-test-files/eicar-word-macro-cmd-echo.doc data/source/
-docker compose up --abort-on-container-exit
-cat data/quarantine/eicar-word-macro-cmd-echo.doc.json
+cp tests/fixtures/eicar-adobe-acrobat-attachment.pdf data/source/
+docker compose -f docker-compose.yml -f docker-compose.runsc.yml up --abort-on-container-exit
+ls data/clean/
 ```
 
 Verify gVisor is active:
@@ -152,18 +129,8 @@ docker inspect scrub-scrub-1 --format '{{.HostConfig.Runtime}}'
 │    ├── already-clean check (skip if exists)       │
 │    ├── LibreOffice (subprocess, per file)         │
 │    ├── PyMuPDF (rasterise PDF)                    │
-│    ├── Pillow (pixel re-encode → PNG)             │
-│    └── clamdscan --stream (scan before write)     │
-│                    │                              │
-└────────────────────┼──────────────────────────────┘
-                     │ Unix socket
-              /run/clamav/clamd.sock
-         (shared Docker volume: clamav-socket)
-                     │
-┌────────────────────┼─────────────────────────────┐
-│  clamav  [runtime: runc]                         │
-│  clamd + freshclam                               │
-└──────────────────────────────────────────────────┘
+│    └── Pillow (pixel re-encode → PNG)             │
+└───────────────────────────────────────────────────┘
 ```
 
-The `scrub` container has no network interface (`network_mode: none`). ClamAV communication is entirely via Unix socket on a shared volume. The gVisor sandbox means a LibreOffice or PyMuPDF exploit cannot reach the host kernel.
+The `scrub` container has no network interface (`network_mode: none`). The gVisor sandbox means a LibreOffice or PyMuPDF exploit cannot reach the host kernel.

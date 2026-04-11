@@ -1,13 +1,14 @@
-## ADDED Requirements
+## REMOVED Requirements
 
-### Requirement: Failed files quarantined, not output
-The system SHALL NOT upload any output PNGs for a file that fails at any stage of processing. The clean output prefix SHALL remain uncontaminated by partial or failed conversions.
+### Requirement: JSON manifest written to quarantine directory
+**Reason**: The quarantine directory and path were exclusively for ClamAV detections. With ClamAV removed, the quarantine concept is eliminated. Processing failures continue to produce error manifests in `data/errors/`.
+**Migration**: Use `data/errors/` manifests for all failure inspection.
 
-#### Scenario: No partial output on failure
-- **WHEN** a file fails after some pages have been rasterized but before upload completes
-- **THEN** no PNG files for that file SHALL appear in the output prefix
+### Requirement: Quarantine manifest content
+**Reason**: Quarantine manifests no longer exist. Error manifests in `data/errors/` remain unchanged.
+**Migration**: Read error manifests from `data/errors/` for failure details.
 
----
+## MODIFIED Requirements
 
 ### Requirement: Known error types
 The system SHALL use the following `error_type` values:

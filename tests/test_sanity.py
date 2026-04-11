@@ -1,17 +1,13 @@
 """
-Basic sanity tests. No ClamAV daemon required — scan_pngs is patched where needed.
-No LibreOffice required — document conversion tests use the image pipeline only.
+Basic sanity tests. No LibreOffice required — document conversion tests use the image pipeline only.
 """
 
 import io
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 from PIL import Image
 
-from scrub import quarantine as qmod
-from scrub.clamav import ScanResult
 from scrub.converter import _block_external_fetches, _csv_to_html, _xml_to_text
 from scrub.fs import derive_output_paths
 from scrub.pipeline import detect_format, process_file
@@ -168,59 +164,6 @@ class TestDeriveOutputPaths:
 
 
 # ---------------------------------------------------------------------------
-# quarantine module
-# ---------------------------------------------------------------------------
-
-
-class TestQuarantine:
-    def test_sha256_deterministic(self):
-        assert qmod.sha256(b"hello") == qmod.sha256(b"hello")
-
-    def test_sha256_differs_for_different_input(self):
-        assert qmod.sha256(b"hello") != qmod.sha256(b"world")
-
-    def test_sha256_known_value(self):
-        # echo -n "" | sha256sum
-        assert (
-            qmod.sha256(b"")
-            == "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        )
-
-    def test_build_manifest_required_fields(self):
-        m = qmod.build_manifest(
-            "a.pdf", "pdf", "ClamAVDetection", "threat", None, 1024, "abc123"
-        )
-        assert m["input_path"] == "a.pdf"
-        assert m["format_detected"] == "pdf"
-        assert m["error_type"] == "ClamAVDetection"
-        assert m["error_detail"] == "threat"
-        assert m["file_size_bytes"] == 1024
-        assert m["sha256"] == "abc123"
-        assert "timestamp" in m
-
-    def test_build_manifest_virus_fields(self):
-        m = qmod.build_manifest(
-            "bad.png",
-            "png",
-            "ClamAVDetection",
-            "threat",
-            None,
-            512,
-            "def456",
-            virus_name="Eicar.Test",
-            scanned_file="page_001.png",
-        )
-        assert m["virus_name"] == "Eicar.Test"
-        assert m["scanned_file"] == "page_001.png"
-
-    def test_build_manifest_stack_trace(self):
-        m = qmod.build_manifest(
-            "f.doc", "doc", "LibreOfficeError", "crash", "tb here", 0, ""
-        )
-        assert m["stack_trace"] == "tb here"
-
-
-# ---------------------------------------------------------------------------
 # sanitize
 # ---------------------------------------------------------------------------
 
@@ -249,123 +192,39 @@ class TestReencodePng:
 
 
 # ---------------------------------------------------------------------------
-# pipeline — image path, ClamAV mocked
+# pipeline — image path
 # ---------------------------------------------------------------------------
 
 
 class TestProcessFileImagePath:
-    async def test_clean_image_written_to_clean_dir(self, tmp_path, monkeypatch):
+    async def test_clean_image_written_to_clean_dir(self, tmp_path):
         _write_png(tmp_path / "source/photo.png")
-        monkeypatch.setattr(
-            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
-        )
 
         result = await process_file(
             rel_path=Path("photo.png"),
             source_dir=tmp_path / "source",
             clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
             errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
         )
 
         assert result == "clean"
         assert (tmp_path / "clean/photo.png.page_001.png").exists()
 
-    async def test_clean_image_not_in_quarantine_or_errors(self, tmp_path, monkeypatch):
+    async def test_clean_image_not_in_errors(self, tmp_path):
         _write_png(tmp_path / "source/photo.png")
-        monkeypatch.setattr(
-            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
-        )
 
         await process_file(
             rel_path=Path("photo.png"),
             source_dir=tmp_path / "source",
             clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
             errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
         )
 
-        assert (
-            not list((tmp_path / "quarantine").rglob("*.json"))
-            if (tmp_path / "quarantine").exists()
-            else True
-        )
         assert (
             not list((tmp_path / "errors").rglob("*.json"))
             if (tmp_path / "errors").exists()
             else True
         )
-
-    async def test_detection_goes_to_quarantine(self, tmp_path, monkeypatch):
-        _write_png(tmp_path / "source/bad.png")
-        monkeypatch.setattr(
-            "scrub.pipeline.scan_pngs",
-            AsyncMock(
-                return_value=ScanResult(
-                    clean=False, virus_name="Eicar.Test", scanned_file="page_001.png"
-                )
-            ),
-        )
-
-        result = await process_file(
-            rel_path=Path("bad.png"),
-            source_dir=tmp_path / "source",
-            clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
-            errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
-        )
-
-        assert result == "quarantine"
-        manifest = json.loads((tmp_path / "quarantine/bad.png.json").read_text())
-        assert manifest["error_type"] == "ClamAVDetection"
-        assert manifest["virus_name"] == "Eicar.Test"
-
-    async def test_detection_does_not_write_to_clean(self, tmp_path, monkeypatch):
-        _write_png(tmp_path / "source/bad.png")
-        monkeypatch.setattr(
-            "scrub.pipeline.scan_pngs",
-            AsyncMock(
-                return_value=ScanResult(
-                    clean=False, virus_name="Eicar.Test", scanned_file="page_001.png"
-                )
-            ),
-        )
-
-        await process_file(
-            rel_path=Path("bad.png"),
-            source_dir=tmp_path / "source",
-            clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
-            errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
-        )
-
-        assert not (tmp_path / "clean").exists() or not list(
-            (tmp_path / "clean").rglob("*.png")
-        )
-
-    async def test_clamav_error_goes_to_quarantine(self, tmp_path, monkeypatch):
-        _write_png(tmp_path / "source/suspect.png")
-        monkeypatch.setattr(
-            "scrub.pipeline.scan_pngs",
-            AsyncMock(return_value=ScanResult(clean=False, error="socket timeout")),
-        )
-
-        result = await process_file(
-            rel_path=Path("suspect.png"),
-            source_dir=tmp_path / "source",
-            clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
-            errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
-        )
-
-        assert result == "quarantine"
-        manifest = json.loads((tmp_path / "quarantine/suspect.png.json").read_text())
-        assert manifest["error_type"] == "ClamAVError"
 
     async def test_unsupported_extension_skipped(self, tmp_path):
         src = tmp_path / "source/movie.mp4"
@@ -376,9 +235,7 @@ class TestProcessFileImagePath:
             rel_path=Path("movie.mp4"),
             source_dir=tmp_path / "source",
             clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
             errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
         )
 
         assert result == "skipped"
@@ -388,22 +245,17 @@ class TestProcessFileImagePath:
             else True
         )
 
-    async def test_unsupported_magic_bytes_goes_to_errors(self, tmp_path, monkeypatch):
+    async def test_unsupported_magic_bytes_goes_to_errors(self, tmp_path):
         # Extension is supported (.pdf) but magic bytes are wrong → UnsupportedFormat error
         src = tmp_path / "source/fake.pdf"
         src.parent.mkdir(parents=True, exist_ok=True)
         src.write_bytes(b"XXXXX not a real pdf XXXXX")
-        monkeypatch.setattr(
-            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
-        )
 
         result = await process_file(
             rel_path=Path("fake.pdf"),
             source_dir=tmp_path / "source",
             clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
             errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
         )
 
         assert result == "error"
@@ -424,28 +276,21 @@ class TestProcessFileImagePath:
             rel_path=Path("big.png"),
             source_dir=tmp_path / "source",
             clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
             errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
         )
 
         assert result == "error"
         manifest = json.loads((tmp_path / "errors/big.png.json").read_text())
         assert manifest["error_type"] == "FileTooLarge"
 
-    async def test_subdirectory_structure_preserved(self, tmp_path, monkeypatch):
+    async def test_subdirectory_structure_preserved(self, tmp_path):
         _write_png(tmp_path / "source/reports/q1/photo.png")
-        monkeypatch.setattr(
-            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
-        )
 
         await process_file(
             rel_path=Path("reports/q1/photo.png"),
             source_dir=tmp_path / "source",
             clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
             errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
         )
 
         assert (tmp_path / "clean/reports/q1/photo.png.page_001.png").exists()
@@ -461,9 +306,7 @@ class TestProcessFileImagePath:
             rel_path=Path("photo.png"),
             source_dir=tmp_path / "source",
             clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
             errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
         )
 
         assert result == "skipped"
@@ -479,9 +322,7 @@ class TestProcessFileImagePath:
             rel_path=Path("reports/q1/photo.png"),
             source_dir=tmp_path / "source",
             clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
             errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
         )
 
         assert result == "skipped"
@@ -607,17 +448,12 @@ class TestProcessFileTextPath:
             return Path(path)
 
         monkeypatch.setattr("scrub.pipeline.text_to_pdf", _fake_text_to_pdf)
-        monkeypatch.setattr(
-            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
-        )
 
         result = await process_file(
             rel_path=Path("notes.txt"),
             source_dir=tmp_path / "source",
             clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
             errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
         )
 
         assert result == "clean"
@@ -643,17 +479,12 @@ class TestProcessFileTextPath:
             return Path(path)
 
         monkeypatch.setattr("scrub.pipeline.text_to_pdf", _fake_text_to_pdf)
-        monkeypatch.setattr(
-            "scrub.pipeline.scan_pngs", AsyncMock(return_value=ScanResult(clean=True))
-        )
 
         result = await process_file(
             rel_path=Path("data.csv"),
             source_dir=tmp_path / "source",
             clean_dir=tmp_path / "clean",
-            quarantine_dir=tmp_path / "quarantine",
             errors_dir=tmp_path / "errors",
-            socket_path="/dev/null",
         )
 
         assert result == "clean"

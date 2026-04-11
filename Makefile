@@ -1,4 +1,17 @@
-.PHONY: clean
+.PHONY: clean clean-all clean-clean clean-errors clean-logs clean-extracts
 
-clean:
-	rm -rf data/clean/* data/quarantine/* data/errors/* data/logs/*
+clean: clean-errors clean-logs
+
+clean-all: clean-clean clean-extracts clean-errors clean-logs
+
+clean-clean:
+	rm -rf data/clean/*
+
+clean-extracts:
+	rm -rf data/extracts/*
+
+clean-errors:
+	rm -rf data/errors/*
+
+clean-logs:
+	rm -rf data/logs/*

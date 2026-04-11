@@ -36,8 +36,6 @@ def success(input_path: str, page_count: int) -> None:
     logger.info(f"{input_path} SUCCESS pages={page_count}")
 
 
-def quarantine(input_path: str, error_type: str, detail: str = "") -> None:
-    logger.warning(f"{input_path} QUARANTINE error_type={error_type} {detail}".rstrip())
 
 
 def error(input_path: str, error_type: str, detail: str = "") -> None:
@@ -53,8 +51,8 @@ def fatal(msg: str) -> None:
 
 
 def summary(
-    total: int, clean: int, quarantined: int, errors: int, skipped: int, expanded: int = 0
+    total: int, clean: int, errors: int, skipped: int, expanded: int = 0
 ) -> None:
     logger.info(
-        f"[done] total={total}  clean={clean}  quarantined={quarantined}  errors={errors}  skipped={skipped}  expanded={expanded}"
+        f"[done] total={total}  clean={clean}  errors={errors}  skipped={skipped}  expanded={expanded}"
     )

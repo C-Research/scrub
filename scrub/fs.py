@@ -27,10 +27,10 @@ async def walk_source(source_dir: Path) -> AsyncIterator[Path]:
         yield p
 
 
-def validate_dirs(source: Path, clean: Path, quarantine: Path, errors: Path) -> None:
+def validate_dirs(source: Path, clean: Path, errors: Path) -> None:
     if not source.is_dir() or not os.access(source, os.R_OK):
         raise RuntimeError(f"Source directory not readable: {source}")
-    for d in (clean, quarantine, errors):
+    for d in (clean, errors):
         d.mkdir(parents=True, exist_ok=True)
         if not os.access(d, os.W_OK):
             raise RuntimeError(f"Directory not writable: {d}")

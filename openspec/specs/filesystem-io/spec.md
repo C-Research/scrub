@@ -27,7 +27,7 @@ The system SHALL treat the source directory as read-only during the pipeline wal
 ---
 
 ### Requirement: Startup directory validation
-The system SHALL verify at startup that the source directory is readable and that the clean and quarantine directories are writable. The system SHALL exit with a fatal error if any check fails.
+The system SHALL verify at startup that the source directory is readable and that the clean and errors directories are writable. The system SHALL exit with a fatal error if any check fails.
 
 #### Scenario: Unwritable clean directory causes fatal exit
 - **WHEN** the clean directory is not writable by the container process
@@ -58,19 +58,6 @@ The system SHALL write each output PNG to the clean directory using aiofiles. Pa
 #### Scenario: Parent directories created on write
 - **WHEN** `clean/reports/q1/report/` does not exist
 - **THEN** the system SHALL create it before writing `page_001.png`
-
----
-
-### Requirement: Quarantine manifest written to quarantine directory
-The system SHALL write the JSON quarantine manifest to `<quarantine_dir>/<relative_input_path>.json`, mirroring the source folder structure.
-
-#### Scenario: Quarantine manifest path mirrors source path
-- **WHEN** `source/reports/q1/malware.docx` is quarantined
-- **THEN** the manifest SHALL be written to `quarantine/reports/q1/malware.docx.json`
-
-#### Scenario: Quarantine parent directories created on write
-- **WHEN** `quarantine/reports/q1/` does not exist
-- **THEN** the system SHALL create it before writing the manifest
 
 ---
 
