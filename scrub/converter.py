@@ -12,10 +12,18 @@ from pathlib import Path
 import defusedxml.ElementTree as _safe_et
 import fitz  # PyMuPDF
 
-# Semaphore capping concurrent LibreOffice processes. Multiple simultaneous
-# LO instances contend over system resources (pipes, process table, gVisor
-# limits) and fail with EAGAIN. Default: 1. Override with SCRUB_LO_WORKERS env var.
-_lo_sem: asyncio.Semaphore | None = None
+# Two separate semaphores for LibreOffice concurrency:
+#
+#   _lo_pdf_sem  — "--convert-to pdf": heavy (page rendering, font rasterization,
+#                  many subsystems). Default 1. Override: SCRUB_LO_WORKERS.
+#
+#   _lo_txt_sem  — "--convert-to txt": light (parse + text extract, no rendering).
+#                  Default max(1, min(4, cpu_count // 2)). Override: SCRUB_LO_TXT_WORKERS.
+#
+# Both semaphores release before the retry backoff sleep so a waiting worker
+# can acquire the slot while this one is backing off.
+_lo_pdf_sem: asyncio.Semaphore | None = None
+_lo_txt_sem: asyncio.Semaphore | None = None
 
 # Retry up to this many times on EAGAIN before surfacing the error.
 _LO_RETRIES = 3
@@ -27,16 +35,27 @@ def _is_eagain(e: "ConversionError") -> bool:
     return any(p in e.detail.lower() for p in _EAGAIN_PHRASES)
 
 
-def _lo_semaphore() -> asyncio.Semaphore:
-    global _lo_sem
-    if _lo_sem is None:
-        # Default 1: each LibreOffice instance spawns ~50 threads; in gVisor/containers
-        # running multiple concurrently exhausts thread/PID table limits quickly.
+def _lo_pdf_semaphore() -> asyncio.Semaphore:
+    global _lo_pdf_sem
+    if _lo_pdf_sem is None:
+        # Default 1: PDF conversion spawns ~50 threads and is heavy on gVisor.
         # Raise via SCRUB_LO_WORKERS if your host can sustain more.
         default = 1
         limit = max(1, int(os.environ.get("SCRUB_LO_WORKERS", str(default)) or str(default)))
-        _lo_sem = asyncio.Semaphore(limit)
-    return _lo_sem
+        _lo_pdf_sem = asyncio.Semaphore(limit)
+    return _lo_pdf_sem
+
+
+def _lo_txt_semaphore() -> asyncio.Semaphore:
+    global _lo_txt_sem
+    if _lo_txt_sem is None:
+        # Text conversion is much lighter than PDF (no rendering), so allow more
+        # concurrent LO instances. Cap at 4 to stay safe under gVisor thread limits.
+        # Override via SCRUB_LO_TXT_WORKERS.
+        default = max(1, min(4, (os.cpu_count() or 2) // 2))
+        limit = max(1, int(os.environ.get("SCRUB_LO_TXT_WORKERS", str(default)) or str(default)))
+        _lo_txt_sem = asyncio.Semaphore(limit)
+    return _lo_txt_sem
 
 
 # Macro security level 4 = no macros run
@@ -96,7 +115,7 @@ async def convert_to_pdf(
 ) -> Path:
     """Convert office document to PDF via LibreOffice. Returns path to temp PDF; caller deletes it."""
     for attempt in range(_LO_RETRIES):
-        async with _lo_semaphore():
+        async with _lo_pdf_semaphore():
             try:
                 return await _convert_to_pdf(input_path, fmt, timeout)
             except ConversionError as e:
@@ -172,7 +191,7 @@ async def convert_to_txt(
 ) -> str:
     """Convert office document to plain text via LibreOffice. Returns text content as a string."""
     for attempt in range(_LO_RETRIES):
-        async with _lo_semaphore():
+        async with _lo_txt_semaphore():
             try:
                 return await _convert_to_txt(input_path, fmt, timeout)
             except ConversionError as e:

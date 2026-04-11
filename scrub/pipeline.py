@@ -318,6 +318,21 @@ async def process_file(
         return "error"
 
 
+async def _reencode_pages(pixel_pages: list[tuple[bytes, int, int]]) -> list[bytes]:
+    """Re-encode all rasterized pages to PNG in parallel via the thread pool."""
+    loop = asyncio.get_running_loop()
+
+    async def _enc(i: int, rgb: bytes, w: int, h: int) -> bytes:
+        try:
+            return await loop.run_in_executor(None, sanitize.reencode_png, rgb, w, h)
+        except Exception as e:
+            raise ConversionError("PillowEncodeError", f"page {i + 1} re-encode failed: {e}")
+
+    return list(await asyncio.gather(*[
+        _enc(i, rgb, w, h) for i, (rgb, w, h) in enumerate(pixel_pages)
+    ]))
+
+
 async def _process_image(raw: bytes, fmt: str) -> list[bytes] | ConversionError:
     loop = asyncio.get_running_loop()
     fd, _tmp = tempfile.mkstemp(suffix=f".{fmt}")
@@ -362,18 +377,7 @@ async def _process_document(
         except Exception as e:
             raise ConversionError("PyMuPDFError", str(e))
 
-        pages = []
-        for i, (rgb_bytes, w, h) in enumerate(pixel_pages):
-            try:
-                png_bytes = await loop.run_in_executor(
-                    None, sanitize.reencode_png, rgb_bytes, w, h
-                )
-            except Exception as e:
-                raise ConversionError(
-                    "PillowEncodeError", f"page {i + 1} re-encode failed: {e}"
-                )
-            pages.append(png_bytes)
-
+        pages = await _reencode_pages(pixel_pages)
         return pages
     finally:
         tmp_input.unlink(missing_ok=True)
@@ -399,18 +403,7 @@ async def _process_text_document(raw: bytes, fmt: str) -> list[bytes] | Conversi
         except Exception as e:
             raise ConversionError("PyMuPDFError", str(e))
 
-        pages = []
-        for i, (rgb_bytes, w, h) in enumerate(pixel_pages):
-            try:
-                png_bytes = await loop.run_in_executor(
-                    None, sanitize.reencode_png, rgb_bytes, w, h
-                )
-            except Exception as e:
-                raise ConversionError(
-                    "PillowEncodeError", f"page {i + 1} re-encode failed: {e}"
-                )
-            pages.append(png_bytes)
-
+        pages = await _reencode_pages(pixel_pages)
         return pages
     finally:
         if pdf_path and pdf_path.exists():
@@ -432,15 +425,7 @@ async def _rasterize_pdf_direct(raw: bytes) -> list[bytes] | ConversionError:
         except Exception as e:
             raise ConversionError("PyMuPDFError", str(e))
 
-        pages = []
-        for i, (rgb_bytes, w, h) in enumerate(pixel_pages):
-            try:
-                png_bytes = await loop.run_in_executor(
-                    None, sanitize.reencode_png, rgb_bytes, w, h
-                )
-            except Exception as e:
-                raise ConversionError("PillowEncodeError", f"page {i + 1} re-encode failed: {e}")
-            pages.append(png_bytes)
+        pages = await _reencode_pages(pixel_pages)
         return pages
     finally:
         tmp.unlink(missing_ok=True)
