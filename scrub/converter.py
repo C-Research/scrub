@@ -3,6 +3,7 @@ import csv
 import html
 import io
 import os
+import random
 import shutil
 import tempfile
 from html.parser import HTMLParser
@@ -13,8 +14,7 @@ import fitz  # PyMuPDF
 
 # Semaphore capping concurrent LibreOffice processes. Multiple simultaneous
 # LO instances contend over system resources (pipes, process table, gVisor
-# limits) and fail with EAGAIN. Default: half the CPU count (min 1).
-# Override with SCRUB_LO_WORKERS env var.
+# limits) and fail with EAGAIN. Default: 1. Override with SCRUB_LO_WORKERS env var.
 _lo_sem: asyncio.Semaphore | None = None
 
 # Retry up to this many times on EAGAIN before surfacing the error.
@@ -30,7 +30,10 @@ def _is_eagain(e: "ConversionError") -> bool:
 def _lo_semaphore() -> asyncio.Semaphore:
     global _lo_sem
     if _lo_sem is None:
-        default = max(1, (os.cpu_count() or 2) // 2)
+        # Default 1: each LibreOffice instance spawns ~50 threads; in gVisor/containers
+        # running multiple concurrently exhausts thread/PID table limits quickly.
+        # Raise via SCRUB_LO_WORKERS if your host can sustain more.
+        default = 1
         limit = max(1, int(os.environ.get("SCRUB_LO_WORKERS", str(default)) or str(default)))
         _lo_sem = asyncio.Semaphore(limit)
     return _lo_sem
@@ -101,7 +104,7 @@ async def convert_to_pdf(
                     pass  # release semaphore, back off, retry
                 else:
                     raise
-        await asyncio.sleep(_LO_RETRY_BASE * (2**attempt))
+        await asyncio.sleep(_LO_RETRY_BASE * (2**attempt) + random.uniform(0, _LO_RETRY_BASE))
     raise ConversionError("LibreOfficeError", "LibreOffice resource unavailable after retries")
 
 
@@ -112,11 +115,17 @@ async def _convert_to_pdf(input_path: Path, fmt: str, timeout: int) -> Path:
     try:
         _setup_lo_profile(profile_dir)
 
-        proc = await asyncio.create_subprocess_exec(
-            *_lo_cmd(input_path, fmt, profile_dir, out_dir),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *_lo_cmd(input_path, fmt, profile_dir, out_dir),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except (BlockingIOError, OSError) as exc:
+            raise ConversionError(
+                "LibreOfficeError",
+                f"resource temporarily unavailable: {exc}",
+            )
 
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
@@ -171,7 +180,7 @@ async def convert_to_txt(
                     pass
                 else:
                     raise
-        await asyncio.sleep(_LO_RETRY_BASE * (2**attempt))
+        await asyncio.sleep(_LO_RETRY_BASE * (2**attempt) + random.uniform(0, _LO_RETRY_BASE))
     raise ConversionError("LibreOfficeError", "LibreOffice resource unavailable after retries")
 
 
@@ -203,11 +212,17 @@ async def _convert_to_txt(input_path: Path, fmt: str, timeout: int) -> str:
             cmd += ["--infilter=Calc MS Excel 2007 XML"]
         cmd.append(str(input_path))
 
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except (BlockingIOError, OSError) as exc:
+            raise ConversionError(
+                "LibreOfficeError",
+                f"resource temporarily unavailable: {exc}",
+            )
 
         try:
             _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)

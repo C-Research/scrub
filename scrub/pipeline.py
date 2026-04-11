@@ -185,7 +185,14 @@ async def process_file(
         return "error"
 
     # Read file and hash
-    raw = src.read_bytes()
+    try:
+        raw = src.read_bytes()
+    except OSError as e:
+        await _error(
+            rel_str, errors_dir, rel_path, "unknown", "UnexpectedError",
+            str(e), traceback.format_exc(), file_size, "",
+        )
+        return "error"
     file_sha256 = hashlib.sha256(raw).hexdigest()
     log.debug(rel_str, "READ", f"size={file_size}  sha256={file_sha256[:16]}…")
 

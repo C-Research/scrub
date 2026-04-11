@@ -89,14 +89,18 @@ async def _run() -> int:
     async def _bounded(rel_path: Path, source_dir: Path) -> None:
         nonlocal clean_count, error_count, skipped_count
         async with sem:
-            result = await process_file(
-                rel_path=rel_path,
-                source_dir=source_dir,
-                clean_dir=_CLEAN,
-                errors_dir=_ERRORS,
-                timeout=timeout,
-                output_mode=output_mode,
-            )
+            try:
+                result = await process_file(
+                    rel_path=rel_path,
+                    source_dir=source_dir,
+                    clean_dir=_CLEAN,
+                    errors_dir=_ERRORS,
+                    timeout=timeout,
+                    output_mode=output_mode,
+                )
+            except Exception:
+                error_count += 1
+                return
             if result == "clean":
                 clean_count += 1
             elif result == "skipped":
