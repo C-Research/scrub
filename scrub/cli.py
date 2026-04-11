@@ -25,13 +25,31 @@ def _optional_int(name: str, default: int) -> int:
         sys.exit(1)
 
 
+def _output_mode() -> str:
+    val = os.environ.get("SCRUB_OUTPUT_MODE", "").strip().lower() or "png"
+    if val not in ("png", "text"):
+        print(
+            f"ERROR: SCRUB_OUTPUT_MODE must be 'png' or 'text', got {val!r}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return val
+
+
 async def _run() -> int:
     workers = _optional_int("SCRUB_WORKERS", max(1, (os.cpu_count() or 1) * 2 - 1))
     timeout = _optional_int("SCRUB_TIMEOUT", 60)
+    output_mode = _output_mode()
     max_file_bytes = _optional_int("SCRUB_MAX_FILE_SIZE", 100) * 1024 * 1024
     max_archive_members = _optional_int("SCRUB_MAX_ARCHIVE_MEMBERS", 1000)
-    max_archive_total_bytes = _optional_int("SCRUB_MAX_ARCHIVE_TOTAL_MB", 500) * 1024 * 1024
-    expand_archives = os.environ.get("SCRUB_ARCHIVES", "1").strip() not in ("0", "false", "no")
+    max_archive_total_bytes = (
+        _optional_int("SCRUB_MAX_ARCHIVE_TOTAL_MB", 500) * 1024 * 1024
+    )
+    expand_archives = os.environ.get("SCRUB_ARCHIVES", "1").strip() not in (
+        "0",
+        "false",
+        "no",
+    )
 
     log.setup(_LOG)
     log.startup(
@@ -54,7 +72,11 @@ async def _run() -> int:
     expanded_count = 0
     if expand_archives:
         expanded_count = await archive.expand_archives(
-            _SOURCE, _EXTRACTS, max_file_bytes, max_archive_members, max_archive_total_bytes
+            _SOURCE,
+            _EXTRACTS,
+            max_file_bytes,
+            max_archive_members,
+            max_archive_total_bytes,
         )
         if expanded_count:
             log.debug("[archive]", f"expanded {expanded_count} archive(s)")
@@ -73,6 +95,7 @@ async def _run() -> int:
                 clean_dir=_CLEAN,
                 errors_dir=_ERRORS,
                 timeout=timeout,
+                output_mode=output_mode,
             )
             if result == "clean":
                 clean_count += 1

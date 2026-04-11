@@ -8,7 +8,7 @@ from pathlib import Path
 import aiofiles
 import rarfile
 
-from . import log
+from . import fs, log
 
 rarfile.UNRAR_TOOL = "/usr/bin/bsdtar"
 
@@ -41,9 +41,7 @@ async def expand_archives(
     archives = await loop.run_in_executor(
         None,
         lambda: [
-            p
-            for p in sorted(source_dir.rglob("*"))
-            if p.is_file() and _is_archive(p)
+            p for p in sorted(source_dir.rglob("*")) if p.is_file() and _is_archive(p)
         ],
     )
     count = 0
@@ -58,19 +56,25 @@ async def expand_archives(
                     log.debug(archive_str, "ARCHIVE_SKIP", "already in source")
                     continue
                 dest_dir = extracts_dir / rel_parent / stem
-                await _expand_targz(archive_path, dest_dir, max_file_bytes, max_members, max_total_bytes)
+                await _expand_targz(
+                    archive_path, dest_dir, max_file_bytes, max_members, max_total_bytes
+                )
             elif archive_path.suffix.lower() == ".zip":
                 if _zip_first_member_in_source(archive_path, source_dir):
                     log.debug(archive_str, "ARCHIVE_SKIP", "already in source")
                     continue
                 dest_dir = extracts_dir / rel_parent / stem
-                await _expand_zip(archive_path, dest_dir, max_file_bytes, max_members, max_total_bytes)
+                await _expand_zip(
+                    archive_path, dest_dir, max_file_bytes, max_members, max_total_bytes
+                )
             elif archive_path.suffix.lower() == ".rar":
                 if _rar_first_member_in_source(archive_path, source_dir):
                     log.debug(archive_str, "ARCHIVE_SKIP", "already in source")
                     continue
                 dest_dir = extracts_dir / rel_parent / stem
-                await _expand_rar(archive_path, dest_dir, max_file_bytes, max_members, max_total_bytes)
+                await _expand_rar(
+                    archive_path, dest_dir, max_file_bytes, max_members, max_total_bytes
+                )
             else:
                 # .gz single-file: sentinel is source_dir / rel_parent / archive_path.stem
                 if (source_dir / rel_parent / archive_path.stem).exists():
@@ -89,6 +93,7 @@ def _is_archive(p: Path) -> bool:
     if name.endswith(".tar.gz") or name.endswith(".tgz"):
         return True
     return p.suffix.lower() in {".zip", ".rar", ".gz"}
+
 
 
 def _safe_dest(member_path_str: str, dest_dir: Path) -> Path | None:
@@ -166,22 +171,37 @@ async def _expand_targz(
         total_bytes = 0
         for i, info in enumerate(tf.getmembers()):
             if i >= max_members:
-                log.debug(archive_str, "ARCHIVE_ABORT", f"member count limit reached ({max_members})")
+                log.debug(
+                    archive_str,
+                    "ARCHIVE_ABORT",
+                    f"member count limit reached ({max_members})",
+                )
                 break
             if info.isdir():
                 continue
             if info.issym() or info.islnk():
                 log.debug(archive_str, "ARCHIVE_SKIP", f"symlink: {info.name}")
                 continue
+            if fs.is_os_artifact(info.name):
+                log.debug(archive_str, "ARCHIVE_SKIP", f"macos artifact: {info.name}")
+                continue
             dest = _safe_dest(info.name, dest_dir)
             if dest is None:
                 log.debug(archive_str, "ARCHIVE_SKIP", f"unsafe path: {info.name}")
                 continue
             if info.size > max_file_bytes:
-                log.debug(archive_str, "ARCHIVE_SKIP", f"oversized ({info.size} bytes): {info.name}")
+                log.debug(
+                    archive_str,
+                    "ARCHIVE_SKIP",
+                    f"oversized ({info.size} bytes): {info.name}",
+                )
                 continue
             if total_bytes + info.size > max_total_bytes:
-                log.debug(archive_str, "ARCHIVE_ABORT", f"total bytes limit reached ({max_total_bytes})")
+                log.debug(
+                    archive_str,
+                    "ARCHIVE_ABORT",
+                    f"total bytes limit reached ({max_total_bytes})",
+                )
                 break
             if dest.exists():
                 log.debug(archive_str, "ARCHIVE_SKIP", f"already exists: {info.name}")
@@ -217,7 +237,11 @@ async def _expand_gz(
                 break
             total += len(chunk)
             if total > max_file_bytes:
-                log.debug(archive_str, "ARCHIVE_ABORT", f"decompressed size exceeds limit ({max_file_bytes} bytes)")
+                log.debug(
+                    archive_str,
+                    "ARCHIVE_ABORT",
+                    f"decompressed size exceeds limit ({max_file_bytes} bytes)",
+                )
                 return
             chunks.append(chunk)
 
@@ -240,25 +264,42 @@ async def _expand_zip(
         total_bytes = 0
         for i, info in enumerate(zf.infolist()):
             if i >= max_members:
-                log.debug(archive_str, "ARCHIVE_ABORT", f"member count limit reached ({max_members})")
+                log.debug(
+                    archive_str,
+                    "ARCHIVE_ABORT",
+                    f"member count limit reached ({max_members})",
+                )
                 break
             if info.is_dir():
                 continue
             if stat.S_ISLNK(info.external_attr >> 16):
                 log.debug(archive_str, "ARCHIVE_SKIP", f"symlink: {info.filename}")
                 continue
+            if fs.is_os_artifact(info.filename):
+                log.debug(archive_str, "ARCHIVE_SKIP", f"macos artifact: {info.filename}")
+                continue
             dest = _safe_dest(info.filename, dest_dir)
             if dest is None:
                 log.debug(archive_str, "ARCHIVE_SKIP", f"unsafe path: {info.filename}")
                 continue
             if info.file_size > max_file_bytes:
-                log.debug(archive_str, "ARCHIVE_SKIP", f"oversized ({info.file_size} bytes): {info.filename}")
+                log.debug(
+                    archive_str,
+                    "ARCHIVE_SKIP",
+                    f"oversized ({info.file_size} bytes): {info.filename}",
+                )
                 continue
             if total_bytes + info.file_size > max_total_bytes:
-                log.debug(archive_str, "ARCHIVE_ABORT", f"total bytes limit reached ({max_total_bytes})")
+                log.debug(
+                    archive_str,
+                    "ARCHIVE_ABORT",
+                    f"total bytes limit reached ({max_total_bytes})",
+                )
                 break
             if dest.exists():
-                log.debug(archive_str, "ARCHIVE_SKIP", f"already exists: {info.filename}")
+                log.debug(
+                    archive_str, "ARCHIVE_SKIP", f"already exists: {info.filename}"
+                )
                 continue
             total_bytes += info.file_size
             data = zf.read(info)
@@ -280,25 +321,42 @@ async def _expand_rar(
         total_bytes = 0
         for i, info in enumerate(rf.infolist()):
             if i >= max_members:
-                log.debug(archive_str, "ARCHIVE_ABORT", f"member count limit reached ({max_members})")
+                log.debug(
+                    archive_str,
+                    "ARCHIVE_ABORT",
+                    f"member count limit reached ({max_members})",
+                )
                 break
             if info.is_dir():
                 continue
             if info.is_symlink():
                 log.debug(archive_str, "ARCHIVE_SKIP", f"symlink: {info.filename}")
                 continue
+            if fs.is_os_artifact(info.filename):
+                log.debug(archive_str, "ARCHIVE_SKIP", f"macos artifact: {info.filename}")
+                continue
             dest = _safe_dest(info.filename, dest_dir)
             if dest is None:
                 log.debug(archive_str, "ARCHIVE_SKIP", f"unsafe path: {info.filename}")
                 continue
             if info.file_size > max_file_bytes:
-                log.debug(archive_str, "ARCHIVE_SKIP", f"oversized ({info.file_size} bytes): {info.filename}")
+                log.debug(
+                    archive_str,
+                    "ARCHIVE_SKIP",
+                    f"oversized ({info.file_size} bytes): {info.filename}",
+                )
                 continue
             if total_bytes + info.file_size > max_total_bytes:
-                log.debug(archive_str, "ARCHIVE_ABORT", f"total bytes limit reached ({max_total_bytes})")
+                log.debug(
+                    archive_str,
+                    "ARCHIVE_ABORT",
+                    f"total bytes limit reached ({max_total_bytes})",
+                )
                 break
             if dest.exists():
-                log.debug(archive_str, "ARCHIVE_SKIP", f"already exists: {info.filename}")
+                log.debug(
+                    archive_str, "ARCHIVE_SKIP", f"already exists: {info.filename}"
+                )
                 continue
             total_bytes += info.file_size
             data = rf.read(info.filename)

@@ -7,6 +7,22 @@ from typing import AsyncIterator
 import aiofiles
 
 
+def is_os_artifact(name: str) -> bool:
+    """True for OS-generated junk that should never be processed as documents.
+
+    macOS: __MACOSX/ directory, AppleDouble resource forks (._*), .DS_Store
+    Windows: Office lock files (~$*) — same extension as the locked doc but not a document
+    """
+    p = Path(name)
+    if "__MACOSX" in p.parts:
+        return True
+    if p.name.startswith("._") or p.name == ".DS_Store":
+        return True
+    if p.name.startswith("~$"):
+        return True
+    return False
+
+
 async def walk_source(source_dir: Path) -> AsyncIterator[Path]:
     loop = asyncio.get_running_loop()
 
@@ -47,6 +63,22 @@ def derive_output_paths(
     stem = rel_path.name.replace("/", "_")
     base_dir = clean_dir / rel_path.parent
     return [base_dir / f"{stem}.{prefix}_{i + 1:03d}.png" for i in range(page_count)]
+
+
+def derive_txt_output_path(
+    source_dir: Path,
+    clean_dir: Path,
+    rel_path: Path,
+) -> Path:
+    stem = rel_path.name.replace("/", "_")
+    base_dir = clean_dir / rel_path.parent
+    return base_dir / f"{stem}.txt"
+
+
+async def write_txt(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    async with aiofiles.open(path, "w", encoding="utf-8") as f:
+        await f.write(text)
 
 
 async def write_png(path: Path, data: bytes) -> None:

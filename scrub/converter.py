@@ -5,6 +5,7 @@ import io
 import os
 import shutil
 import tempfile
+from html.parser import HTMLParser
 from pathlib import Path
 
 import defusedxml.ElementTree as _safe_et
@@ -116,6 +117,112 @@ async def convert_to_pdf(
         shutil.rmtree(out_dir, ignore_errors=True)
 
 
+async def convert_to_txt(
+    input_path: Path,
+    fmt: str,
+    timeout: int = 60,
+) -> str:
+    """Convert office document to plain text via LibreOffice. Returns text content as a string."""
+    profile_dir = Path(tempfile.mkdtemp(prefix="lo_profile_"))
+    out_dir = Path(tempfile.mkdtemp(prefix="lo_out_"))
+
+    try:
+        _setup_lo_profile(profile_dir)
+
+        cmd = [
+            "libreoffice",
+            "--headless",
+            "--norestore",
+            f"-env:UserInstallation=file://{profile_dir}",
+            "--convert-to",
+            "txt:Text",
+            "--outdir",
+            str(out_dir),
+        ]
+        if fmt == "xlsx":
+            cmd += ["--infilter=Calc MS Excel 2007 XML"]
+        cmd.append(str(input_path))
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+        try:
+            _, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await proc.wait()
+            except ProcessLookupError:
+                pass
+            raise ConversionError(
+                "LibreOfficeTimeout",
+                f"LibreOffice exceeded {timeout}s timeout",
+            )
+
+        if proc.returncode != 0:
+            err = stderr.decode(errors="replace").strip()
+            raise ConversionError(
+                "LibreOfficeError",
+                f"LibreOffice exited {proc.returncode}: {err[:500]}",
+            )
+
+        txts = list(out_dir.glob("*.txt"))
+        if not txts:
+            raise ConversionError(
+                "LibreOfficeError", "LibreOffice produced no text output"
+            )
+
+        return txts[0].read_text(encoding="utf-8", errors="replace")
+
+    finally:
+        shutil.rmtree(profile_dir, ignore_errors=True)
+        shutil.rmtree(out_dir, ignore_errors=True)
+
+
+_SCANNED_THRESHOLD = 50  # non-whitespace chars below this → treat as scanned
+
+_SPREADSHEET_FORMATS = {"xlsx", "xls", "csv"}
+
+
+def is_spreadsheet_fmt(fmt: str) -> bool:
+    return fmt in _SPREADSHEET_FORMATS
+
+
+def extract_text_from_pdf(pdf_path: Path) -> list[str] | None:
+    """Extract per-page text from a PDF via PyMuPDF.
+
+    Returns a list of strings (one per page), or None if the document appears
+    to be scanned (total non-whitespace chars below threshold).
+    """
+    try:
+        doc = fitz.open(str(pdf_path))
+    except Exception as e:
+        raise ConversionError("PyMuPDFError", f"fitz.open failed: {e}")
+
+    try:
+        if doc.page_count == 0:
+            raise ConversionError("EmptyDocument", "PDF has zero pages")
+
+        texts = []
+        for page in doc:
+            try:
+                texts.append(page.get_text())
+            except Exception as e:
+                raise ConversionError(
+                    "PyMuPDFError", f"page {page.number} text extraction failed: {e}"
+                )
+
+        total_nonws = sum(1 for c in "".join(texts) if not c.isspace())
+        if total_nonws < _SCANNED_THRESHOLD:
+            return None  # treat as scanned, caller should fall back to PNG
+        return texts
+    finally:
+        doc.close()
+
+
 def rasterize_pdf(pdf_path: Path) -> list[tuple[bytes, int, int]]:
     """Rasterize each PDF page to raw RGB bytes. Returns list of (rgb_bytes, width, height)."""
     try:
@@ -140,6 +247,59 @@ def rasterize_pdf(pdf_path: Path) -> list[tuple[bytes, int, int]]:
         return results
     finally:
         doc.close()
+
+
+# ---------------------------------------------------------------------------
+# Text-format extractor (text mode — no WeasyPrint)
+# ---------------------------------------------------------------------------
+
+
+class _TextExtractor(HTMLParser):
+    """Strip HTML tags; suppress content inside <script> and <style> elements."""
+
+    _SUPPRESS = {"script", "style"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._parts: list[str] = []
+        self._suppress_depth = 0
+
+    def handle_starttag(self, tag: str, attrs: list) -> None:
+        if tag in self._SUPPRESS:
+            self._suppress_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SUPPRESS and self._suppress_depth > 0:
+            self._suppress_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if self._suppress_depth == 0:
+            self._parts.append(data)
+
+    def get_text(self) -> str:
+        return "".join(self._parts)
+
+
+def extract_plain_text(raw: bytes, fmt: str) -> str:
+    """Extract plain text from a text-format file (txt, csv, html, htm, xml).
+
+    txt/csv: UTF-8 passthrough.
+    html/htm: tags stripped, <script>/<style> bodies excluded.
+    xml: element text extracted via defusedxml itertext.
+    """
+    if fmt in ("txt", "csv"):
+        return raw.decode("utf-8", errors="replace")
+    if fmt in ("html", "htm"):
+        parser = _TextExtractor()
+        parser.feed(raw.decode("utf-8", errors="replace"))
+        return parser.get_text()
+    if fmt == "xml":
+        try:
+            root = _safe_et.fromstring(raw)
+            return "\n".join(t for t in root.itertext() if t.strip())
+        except Exception:
+            return raw.decode("utf-8", errors="replace")
+    return raw.decode("utf-8", errors="replace")
 
 
 # ---------------------------------------------------------------------------

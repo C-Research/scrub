@@ -36,8 +36,6 @@ def success(input_path: str, page_count: int) -> None:
     logger.info(f"{input_path} SUCCESS pages={page_count}")
 
 
-
-
 def error(input_path: str, error_type: str, detail: str = "") -> None:
     logger.warning(f"{input_path} ERROR error_type={error_type} {detail}".rstrip())
 

@@ -8,7 +8,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import fs, log, sanitize
-from .converter import ConversionError, convert_to_pdf, rasterize_pdf, text_to_pdf
+from .converter import (
+    ConversionError,
+    convert_to_pdf,
+    convert_to_txt,
+    extract_plain_text,
+    extract_text_from_pdf,
+    rasterize_pdf,
+    text_to_pdf,
+)
 
 
 def _env_int(name: str, default: int) -> int:
@@ -110,6 +118,7 @@ async def process_file(
     clean_dir: Path,
     errors_dir: Path,
     timeout: int = 60,
+    output_mode: str = "png",
 ) -> str:
     """Process one file. Returns 'clean', 'skipped', or 'error'."""
     src = source_dir / rel_path
@@ -121,16 +130,28 @@ async def process_file(
         log.skip(rel_str, ext)
         return "skipped"
 
+    # Skip OS-generated junk (macOS resource forks, .DS_Store, Windows Office lock files)
+    if fs.is_os_artifact(str(rel_path)):
+        log.skip(rel_str, "os_artifact")
+        return "skipped"
+
     # Skip if clean output already exists
     out_dir = clean_dir / rel_path.parent
-    sentinel = (f"{rel_path.name}.page_", f"{rel_path.name}.sheet_")
-    try:
-        with os.scandir(out_dir) as it:
-            if any(e.name.startswith(sentinel) for e in it):
-                log.skip(rel_str, "already_clean")
-                return "skipped"
-    except OSError:
-        pass
+    _already_clean = False
+    if output_mode == "text":
+        txt_out = fs.derive_txt_output_path(source_dir, clean_dir, rel_path)
+        _already_clean = txt_out.exists()
+    if not _already_clean:
+        sentinel = (f"{rel_path.name}.page_", f"{rel_path.name}.sheet_")
+        try:
+            with os.scandir(out_dir) as it:
+                if any(e.name.startswith(sentinel) for e in it):
+                    _already_clean = True
+        except OSError:
+            pass
+    if _already_clean:
+        log.skip(rel_str, "already_clean")
+        return "skipped"
 
     # Pre-flight: size check before reading full file
     try:
@@ -172,7 +193,11 @@ async def process_file(
     fmt = detect_format(raw[:16], rel_path.name)
     log.start(rel_str, fmt)
 
-    if fmt not in _IMAGE_FORMATS and fmt not in _OFFICE_FORMATS and fmt not in _TEXT_FORMATS:
+    if (
+        fmt not in _IMAGE_FORMATS
+        and fmt not in _OFFICE_FORMATS
+        and fmt not in _TEXT_FORMATS
+    ):
         await _error(
             rel_str,
             errors_dir,
@@ -190,12 +215,43 @@ async def process_file(
         if fmt in _IMAGE_FORMATS:
             log.debug(rel_str, "PROCESS", "path=image")
             pages = await _process_image(raw, fmt)
-        elif fmt in _TEXT_FORMATS:
-            log.debug(rel_str, "PROCESS", "path=text  step=weasyprint→pdf")
-            pages = await _process_text_document(raw, fmt)
+        elif output_mode == "text":
+            if fmt in _TEXT_FORMATS:
+                log.debug(rel_str, "PROCESS", "path=text  mode=text  step=extract")
+                text = extract_plain_text(raw, fmt)
+                txt_out = fs.derive_txt_output_path(source_dir, clean_dir, rel_path)
+                log.debug(rel_str, "WRITE", str(txt_out))
+                await fs.write_txt(txt_out, text)
+                log.success(rel_str, 1)
+                return "clean"
+
+            if fmt == "pdf":
+                log.debug(rel_str, "PROCESS", "path=pdf  mode=text  step=pymupdf→text")
+                texts = await _process_pdf_text(raw)
+                if texts is not None:
+                    txt_out = fs.derive_txt_output_path(source_dir, clean_dir, rel_path)
+                    log.debug(rel_str, "WRITE", str(txt_out))
+                    await fs.write_txt(txt_out, "\f".join(texts))
+                    log.success(rel_str, len(texts))
+                    return "clean"
+                # scanned PDF → fall through to PNG rasterization
+                log.debug(rel_str, "PROCESS", "mode=text  scanned=true  fallback=png")
+                pages = await _rasterize_pdf_direct(raw)
+            else:
+                log.debug(rel_str, "PROCESS", "path=document  mode=text  step=libreoffice→txt")
+                text = await _process_document_text(raw, fmt, timeout)
+                txt_out = fs.derive_txt_output_path(source_dir, clean_dir, rel_path)
+                log.debug(rel_str, "WRITE", str(txt_out))
+                await fs.write_txt(txt_out, text)
+                log.success(rel_str, 1)
+                return "clean"
         else:
-            log.debug(rel_str, "PROCESS", "path=document  step=libreoffice→pdf")
-            pages = await _process_document(raw, fmt, timeout)
+            if fmt in _TEXT_FORMATS:
+                log.debug(rel_str, "PROCESS", "path=text  step=weasyprint→pdf")
+                pages = await _process_text_document(raw, fmt)
+            else:
+                log.debug(rel_str, "PROCESS", "path=document  step=libreoffice→pdf")
+                pages = await _process_document(raw, fmt, timeout)
 
         if isinstance(pages, ConversionError):
             await _error(
@@ -352,6 +408,78 @@ async def _process_text_document(raw: bytes, fmt: str) -> list[bytes] | Conversi
     finally:
         if pdf_path and pdf_path.exists():
             pdf_path.unlink(missing_ok=True)
+
+
+async def _rasterize_pdf_direct(raw: bytes) -> list[bytes] | ConversionError:
+    """Rasterize PDF bytes directly via PyMuPDF, skipping LibreOffice."""
+    loop = asyncio.get_running_loop()
+    fd, _tmp = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    tmp = Path(_tmp)
+    try:
+        tmp.write_bytes(raw)
+        try:
+            pixel_pages = await loop.run_in_executor(None, rasterize_pdf, tmp)
+        except ConversionError:
+            raise
+        except Exception as e:
+            raise ConversionError("PyMuPDFError", str(e))
+
+        pages = []
+        for i, (rgb_bytes, w, h) in enumerate(pixel_pages):
+            try:
+                png_bytes = await loop.run_in_executor(
+                    None, sanitize.reencode_png, rgb_bytes, w, h
+                )
+            except Exception as e:
+                raise ConversionError("PillowEncodeError", f"page {i + 1} re-encode failed: {e}")
+            pages.append(png_bytes)
+        return pages
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+async def _process_document_text(raw: bytes, fmt: str, timeout: int) -> str:
+    """Convert office doc to plain text via LO --convert-to txt.
+
+    Returns text content as a string. Raises ConversionError on failure.
+    """
+    fd, _tmp_input = tempfile.mkstemp(suffix=f".{fmt}")
+    os.close(fd)
+    tmp_input = Path(_tmp_input)
+    try:
+        tmp_input.write_bytes(raw)
+        try:
+            return await convert_to_txt(tmp_input, fmt, timeout)
+        except ConversionError:
+            raise
+        except Exception as e:
+            raise ConversionError("LibreOfficeError", str(e))
+    finally:
+        tmp_input.unlink(missing_ok=True)
+
+
+async def _process_pdf_text(raw: bytes) -> list[str] | None:
+    """Extract text from PDF bytes directly via PyMuPDF (no LO).
+
+    Returns list of page strings, or None if the document appears scanned.
+    Raises ConversionError on processing failure.
+    """
+    loop = asyncio.get_running_loop()
+    fd, _tmp = tempfile.mkstemp(suffix=".pdf")
+    os.close(fd)
+    tmp = Path(_tmp)
+    try:
+        tmp.write_bytes(raw)
+        try:
+            texts = await loop.run_in_executor(None, extract_text_from_pdf, tmp)
+        except ConversionError:
+            raise
+        except Exception as e:
+            raise ConversionError("PyMuPDFError", str(e))
+        return texts  # list[str] or None (scanned)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 async def _error(

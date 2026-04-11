@@ -9,7 +9,9 @@ No, I don't want none of your time
 
 **Supported formats:** PDF, DOCX, DOC, XLSX, XLS, PPTX, PPT, CSV, PNG, JPG, TIFF, BMP, GIF, ZIP, RAR, GZ, TAR.GZ, TGZ
 
-**Pipeline:** archives expanded → file → magic-byte detection → LibreOffice → PDF → PyMuPDF → raw pixels → Pillow re-encode → clean PNG
+**Default pipeline:** archives expanded → file → magic-byte detection → LibreOffice → PDF → PyMuPDF → raw pixels → Pillow re-encode → clean PNG
+
+**Text extraction pipeline** (`SCRUB_OUTPUT_MODE=text`): same input handling, but documents with a text layer are extracted directly to `.txt` instead of rasterized — skipping the OCR round-trip. Scanned PDFs and images fall back to PNG automatically.
 
 ## Requirements
 
@@ -59,11 +61,17 @@ docker compose -f docker-compose.yml -f docker-compose.runsc.yml up
 | `data/errors/` | JSON manifests for processing failures |
 | `data/logs/` | Structured log file (`scrub.log`) |
 
-Each input file produces one PNG per page (documents) or one PNG (images). Output filenames embed the original filename:
+Output filenames embed the original filename. In default PNG mode:
 
 - `report.pdf` → `report.pdf.page_001.png`, `report.pdf.page_002.png`, …
 - `budget.xlsx` → `budget.xlsx.sheet_001.png`, `budget.xlsx.sheet_002.png`, …
 - `photo.png` → `photo.png.page_001.png`
+
+In text mode (`SCRUB_OUTPUT_MODE=text`), documents with a text layer produce a single UTF-8 `.txt` file with pages separated by form-feed (`\f`). Documents without a text layer (scanned PDFs, images) still produce PNG:
+
+- `report.pdf` → `report.pdf.txt` (text layer) or `report.pdf.page_001.png` (scanned)
+- `budget.xlsx` → `budget.xlsx.txt`
+- `photo.png` → `photo.png.page_001.png` (always PNG)
 
 Files with existing clean output are skipped on re-runs — only new or previously unprocessed files are cleaned.
 
@@ -90,6 +98,7 @@ Environment variables (set in shell before running, or edit `docker-compose.yml`
 
 | Variable | Default | Description |
 |---|---|---|
+| `SCRUB_OUTPUT_MODE` | `png` | Output mode: `png` (rasterize) or `text` (extract text layer) |
 | `SCRUB_WORKERS` | `ncpu*2-1` | Concurrent file workers |
 | `SCRUB_TIMEOUT` | `60` | Per-file LibreOffice timeout (seconds) |
 | `SCRUB_MAX_FILE_SIZE` | `100` | Per-file size limit (MB) |
@@ -127,9 +136,13 @@ docker inspect scrub-scrub-1 --format '{{.HostConfig.Runtime}}'
 │  cli.py → archive.py (expand .zip/.rar)           │
 │        → pipeline.py (per file)                   │
 │    ├── already-clean check (skip if exists)       │
-│    ├── LibreOffice (subprocess, per file)         │
-│    ├── PyMuPDF (rasterise PDF)                    │
-│    └── Pillow (pixel re-encode → PNG)             │
+│    ├── png mode (default)                         │
+│    │     LibreOffice → PDF → PyMuPDF → Pillow     │
+│    │     → clean PNG(s)                           │
+│    └── text mode (SCRUB_OUTPUT_MODE=text)         │
+│          PDF/office: PyMuPDF get_text()           │
+│          → clean .txt  (or PNG fallback if        │
+│            scanned / image input)                 │
 └───────────────────────────────────────────────────┘
 ```
 
