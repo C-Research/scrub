@@ -151,8 +151,8 @@ async def _convert_to_pdf(input_path: Path, fmt: str, timeout: int) -> Path:
         except asyncio.TimeoutError:
             try:
                 proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except (ProcessLookupError, asyncio.TimeoutError):
                 pass
             raise ConversionError(
                 "LibreOfficeTimeout",
@@ -248,8 +248,8 @@ async def _convert_to_txt(input_path: Path, fmt: str, timeout: int) -> str:
         except asyncio.TimeoutError:
             try:
                 proc.kill()
-                await proc.wait()
-            except ProcessLookupError:
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except (ProcessLookupError, asyncio.TimeoutError):
                 pass
             raise ConversionError(
                 "LibreOfficeTimeout",
