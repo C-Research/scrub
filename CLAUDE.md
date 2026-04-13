@@ -24,15 +24,15 @@ ruff format scrub/ tests/
 bandit scrub/
 
 # Build and run (Docker)
-docker compose -f docker-compose.yml -f docker-compose.runsc.yml build
+docker compose build
 mkdir -p data/source data/extracts data/clean data/errors data/logs
-docker compose -f docker-compose.yml -f docker-compose.runsc.yml up
+SCRUB_RUNTIME=runsc docker compose up
 
 # Local dev install
 pip install -e ".[dev]"
 ```
 
-Environment variables: `SCRUB_WORKERS` (default: CPU×2−1), `SCRUB_TIMEOUT` (LibreOffice timeout in seconds, default 60).
+Environment variables: `SCRUB_RUNTIME` (default: `runc`; set to `runsc`/`runsc-kvm` for gVisor), `SCRUB_WORKERS` (default: CPU×2−1), `SCRUB_TIMEOUT` (LibreOffice timeout in seconds, default 60).
 
 ## Architecture
 

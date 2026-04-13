@@ -16,23 +16,23 @@ No, I don't want none of your time
 ## Requirements
 
 - Docker Engine (from apt, not Snap)
-- gVisor (`runsc`) — provides kernel-level sandbox isolation
+- gVisor (`runsc`) — optional; provides kernel-level sandbox isolation (recommended for production)
 
 ## Setup
 
-### 1. Install gVisor
+### 1. Install gVisor (recommended)
 
 Follow the [gVisor installation docs](https://gvisor.dev/docs/user_guide/install/) to install `runsc` and register it with Docker.
 
 One scrub-specific requirement when configuring the runtime in `daemon.json`:
-- On bare metal with KVM available, use `runsc-kvm` (hardware virtualisation) rather than `runsc` (ptrace/systrap) — significantly faster for LibreOffice workloads. Change the `runtime:` line in `docker-compose.yml` if KVM isn't available.
+- On bare metal with KVM available, use `runsc-kvm` (hardware virtualisation) rather than `runsc` (ptrace/systrap) — significantly faster for LibreOffice workloads.
+
+Set `SCRUB_RUNTIME=runsc` (or `SCRUB_RUNTIME=runsc-kvm`) before running. Without it, the default `runc` runtime is used — useful for CI or machines without gVisor installed.
 
 ### 2. Build the image
 
-`docker-compose.yml` is the base config (volumes, caps, network isolation). `docker-compose.runsc.yml` overlays the gVisor runtime — omit it to run under the default `runc` (useful for CI or machines without gVisor installed).
-
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.runsc.yml build
+docker compose build
 ```
 
 ## Running
@@ -48,7 +48,11 @@ Place input files in `data/source/`. Source is mounted read-only — scrub never
 ### Start
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.runsc.yml up
+# Default (runc — no gVisor):
+docker compose up
+
+# With gVisor (recommended for production):
+SCRUB_RUNTIME=runsc docker compose up
 ```
 
 ### Output
@@ -98,6 +102,7 @@ Environment variables (set in shell before running, or edit `docker-compose.yml`
 
 | Variable | Default | Description |
 |---|---|---|
+| `SCRUB_RUNTIME` | `runc` | Docker runtime: `runc` (default) or `runsc`/`runsc-kvm` (gVisor) |
 | `SCRUB_OUTPUT_MODE` | `png` | Output mode: `png` (rasterize) or `text` (extract text layer) |
 | `SCRUB_WORKERS` | `ncpu*2-1` | Concurrent file workers |
 | `SCRUB_TIMEOUT` | `60` | Per-file LibreOffice timeout (seconds) |
@@ -106,7 +111,7 @@ Environment variables (set in shell before running, or edit `docker-compose.yml`
 | `SCRUB_MAX_ARCHIVE_TOTAL_MB` | `500` | Max total uncompressed size per archive (MB) |
 
 ```bash
-SCRUB_WORKERS=4 SCRUB_TIMEOUT=120 docker compose -f docker-compose.yml -f docker-compose.runsc.yml up
+SCRUB_RUNTIME=runsc SCRUB_WORKERS=4 SCRUB_TIMEOUT=120 docker compose up
 ```
 
 ## Verification
@@ -115,14 +120,14 @@ Smoke test — process a plain image and verify output lands in `data/clean/`:
 
 ```bash
 cp tests/fixtures/eicar-adobe-acrobat-attachment.pdf data/source/
-docker compose -f docker-compose.yml -f docker-compose.runsc.yml up --abort-on-container-exit
+SCRUB_RUNTIME=runsc docker compose up --abort-on-container-exit
 ls data/clean/
 ```
 
 Verify gVisor is active:
 
 ```bash
-# Should print "runsc" not "runc"
+# Should print "runsc" (or "runsc-kvm"), not "runc"
 docker inspect scrub-scrub-1 --format '{{.HostConfig.Runtime}}'
 ```
 

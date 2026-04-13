@@ -1,6 +1,7 @@
 services:
   scrub:
     build: .
+    runtime: ${SCRUB_RUNTIME:-runc}
     network_mode: none # no network egress
     cap_drop:
       - ALL
@@ -10,7 +11,6 @@ services:
     tmpfs:
       - /tmp:size=2g,mode=1777
     environment:
-      # Optional tuning — override by setting these in the shell before `docker compose up`
       SCRUB_WORKERS: "" # default: ncpu*2-1
       SCRUB_TIMEOUT: "60"
       SCRUB_MEMORY_LIMIT: "512"
