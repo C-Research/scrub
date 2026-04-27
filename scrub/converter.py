@@ -5,6 +5,7 @@ import io
 import os
 import random
 import shutil
+import sys
 import tempfile
 from html.parser import HTMLParser
 from pathlib import Path
@@ -278,6 +279,11 @@ async def _convert_to_txt(input_path: Path, fmt: str, timeout: int) -> str:
 
 _SCANNED_THRESHOLD = 50  # non-whitespace chars below this → treat as scanned
 
+_MAX_PDF_PAGES = max(1, int(os.environ.get("SCRUB_MAX_PAGES", "500") or "500"))
+# Per-page pixel ceiling before rasterization; prevents huge-dimension decompression bombs.
+# Default: ~7000×7000 px which covers A0 at 150 dpi with room to spare.
+_MAX_PAGE_PIXELS = max(1, int(os.environ.get("SCRUB_MAX_PAGE_PIXELS", "50000000") or "50000000"))
+
 _SPREADSHEET_FORMATS = {"xlsx", "xls", "csv"}
 
 
@@ -299,15 +305,18 @@ def extract_text_from_pdf(pdf_path: Path) -> list[str] | None:
     try:
         if doc.page_count == 0:
             raise ConversionError("EmptyDocument", "PDF has zero pages")
+        if doc.page_count > _MAX_PDF_PAGES:
+            raise ConversionError(
+                "FileTooLarge",
+                f"PDF has {doc.page_count} pages, limit is {_MAX_PDF_PAGES}",
+            )
 
         texts = []
         for page in doc:
             try:
                 texts.append(page.get_text())
             except Exception as e:
-                raise ConversionError(
-                    "PyMuPDFError", f"page {page.number} text extraction failed: {e}"
-                )
+                raise ConversionError("PyMuPDFError", f"page {page.number} text extraction failed: {e}")
 
         total_nonws = sum(1 for c in "".join(texts) if not c.isspace())
         if total_nonws < _SCANNED_THRESHOLD:
@@ -315,6 +324,82 @@ def extract_text_from_pdf(pdf_path: Path) -> list[str] | None:
         return texts
     finally:
         doc.close()
+
+
+async def _run_fitz_subprocess(cmd: str, pdf_path: Path, timeout: int) -> object:
+    """Run a fitz operation in an isolated subprocess.
+
+    Returns the unpickled result, or raises ConversionError.
+    Exit 139 (segfault from corrupt PDF) is caught and mapped to PyMuPDFError.
+    """
+    import pickle
+
+    fd, out_path_str = tempfile.mkstemp(suffix=".pkl")
+    os.close(fd)
+    out_path = Path(out_path_str)
+    try:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                sys.executable, "-m", "scrub._fitz_worker", cmd, str(pdf_path), out_path_str,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+        except (BlockingIOError, OSError) as exc:
+            raise ConversionError("PyMuPDFError", f"subprocess spawn failed: {exc}")
+
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=timeout)
+        except asyncio.TimeoutError:
+            try:
+                proc.kill()
+                await asyncio.wait_for(proc.wait(), timeout=5.0)
+            except (ProcessLookupError, asyncio.TimeoutError):
+                pass
+            raise ConversionError("PyMuPDFError", f"fitz worker exceeded {timeout}s timeout")
+
+        if proc.returncode in (139, -11):
+            raise ConversionError(
+                "PyMuPDFError",
+                "MuPDF crashed (SIGSEGV) on corrupt or adversarial PDF",
+            )
+
+        data = out_path.read_bytes()
+        if not data:
+            raise ConversionError(
+                "PyMuPDFError",
+                f"fitz worker exited {proc.returncode} without writing output",
+            )
+        payload = pickle.loads(data)  # noqa: S301 — trusted: written by our own subprocess
+        if payload[0] == "ok":
+            return payload[1]
+        raise ConversionError(payload[1], payload[2])
+    finally:
+        out_path.unlink(missing_ok=True)
+
+
+async def rasterize_pdf_safe(
+    pdf_path: Path,
+    timeout: int = 120,
+) -> list[bytes]:
+    """Rasterize PDF in an isolated subprocess; returns list of PNG bytes.
+
+    Crash-safe: a MuPDF SIGSEGV raises ConversionError instead of killing the worker.
+    """
+    result = await _run_fitz_subprocess("rasterize", pdf_path, timeout)
+    return result  # type: ignore[return-value]
+
+
+async def extract_text_from_pdf_safe(
+    pdf_path: Path,
+    timeout: int = 120,
+) -> list[str] | None:
+    """Extract per-page text from PDF in an isolated subprocess.
+
+    Crash-safe: a MuPDF SIGSEGV raises ConversionError instead of killing the worker.
+    Returns list of page strings or None if the document appears scanned.
+    """
+    result = await _run_fitz_subprocess("extract_text", pdf_path, timeout)
+    return result  # type: ignore[return-value]
 
 
 def rasterize_pdf(pdf_path: Path) -> list[tuple[bytes, int, int]]:
@@ -327,10 +412,24 @@ def rasterize_pdf(pdf_path: Path) -> list[tuple[bytes, int, int]]:
     try:
         if doc.page_count == 0:
             raise ConversionError("EmptyDocument", "PDF has zero pages")
+        if doc.page_count > _MAX_PDF_PAGES:
+            raise ConversionError(
+                "FileTooLarge",
+                f"PDF has {doc.page_count} pages, limit is {_MAX_PDF_PAGES}",
+            )
 
         mat = fitz.Matrix(150 / 72, 150 / 72)  # ~150 dpi
         results = []
         for page in doc:
+            r = page.rect
+            w = int(r.width * 150 / 72)
+            h = int(r.height * 150 / 72)
+            if w * h > _MAX_PAGE_PIXELS:
+                raise ConversionError(
+                    "FileTooLarge",
+                    f"page {page.number} would rasterize to {w}×{h} px "
+                    f"({w * h} pixels), limit is {_MAX_PAGE_PIXELS}",
+                )
             try:
                 pix = page.get_pixmap(matrix=mat, colorspace=fitz.csRGB, alpha=False)
                 results.append((bytes(pix.samples), pix.width, pix.height))

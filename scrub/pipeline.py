@@ -13,8 +13,8 @@ from .converter import (
     convert_to_pdf,
     convert_to_txt,
     extract_plain_text,
-    extract_text_from_pdf,
-    rasterize_pdf,
+    extract_text_from_pdf_safe,
+    rasterize_pdf_safe,
     text_to_pdf,
 )
 
@@ -318,20 +318,6 @@ async def process_file(
         return "error"
 
 
-async def _reencode_pages(pixel_pages: list[tuple[bytes, int, int]]) -> list[bytes]:
-    """Re-encode all rasterized pages to PNG in parallel via the thread pool."""
-    loop = asyncio.get_running_loop()
-
-    async def _enc(i: int, rgb: bytes, w: int, h: int) -> bytes:
-        try:
-            return await loop.run_in_executor(None, sanitize.reencode_png, rgb, w, h)
-        except Exception as e:
-            raise ConversionError("PillowEncodeError", f"page {i + 1} re-encode failed: {e}")
-
-    return list(await asyncio.gather(*[
-        _enc(i, rgb, w, h) for i, (rgb, w, h) in enumerate(pixel_pages)
-    ]))
-
 
 async def _process_image(raw: bytes, fmt: str) -> list[bytes] | ConversionError:
     loop = asyncio.get_running_loop()
@@ -355,7 +341,6 @@ async def _process_image(raw: bytes, fmt: str) -> list[bytes] | ConversionError:
 async def _process_document(
     raw: bytes, fmt: str, timeout: int
 ) -> list[bytes] | ConversionError:
-    loop = asyncio.get_running_loop()
     fd, _tmp_input = tempfile.mkstemp(suffix=f".{fmt}")
     os.close(fd)
     tmp_input = Path(_tmp_input)
@@ -370,15 +355,7 @@ async def _process_document(
         except Exception as e:
             raise ConversionError("LibreOfficeError", str(e))
 
-        try:
-            pixel_pages = await loop.run_in_executor(None, rasterize_pdf, pdf_path)
-        except ConversionError:
-            raise
-        except Exception as e:
-            raise ConversionError("PyMuPDFError", str(e))
-
-        pages = await _reencode_pages(pixel_pages)
-        return pages
+        return await rasterize_pdf_safe(pdf_path, timeout=timeout)
     finally:
         tmp_input.unlink(missing_ok=True)
         if pdf_path and pdf_path.exists():
@@ -396,15 +373,7 @@ async def _process_text_document(raw: bytes, fmt: str) -> list[bytes] | Conversi
         except Exception as e:
             raise ConversionError("TextRenderError", str(e))
 
-        try:
-            pixel_pages = await loop.run_in_executor(None, rasterize_pdf, pdf_path)
-        except ConversionError:
-            raise
-        except Exception as e:
-            raise ConversionError("PyMuPDFError", str(e))
-
-        pages = await _reencode_pages(pixel_pages)
-        return pages
+        return await rasterize_pdf_safe(pdf_path)
     finally:
         if pdf_path and pdf_path.exists():
             pdf_path.unlink(missing_ok=True)
@@ -412,21 +381,12 @@ async def _process_text_document(raw: bytes, fmt: str) -> list[bytes] | Conversi
 
 async def _rasterize_pdf_direct(raw: bytes) -> list[bytes] | ConversionError:
     """Rasterize PDF bytes directly via PyMuPDF, skipping LibreOffice."""
-    loop = asyncio.get_running_loop()
     fd, _tmp = tempfile.mkstemp(suffix=".pdf")
     os.close(fd)
     tmp = Path(_tmp)
     try:
         tmp.write_bytes(raw)
-        try:
-            pixel_pages = await loop.run_in_executor(None, rasterize_pdf, tmp)
-        except ConversionError:
-            raise
-        except Exception as e:
-            raise ConversionError("PyMuPDFError", str(e))
-
-        pages = await _reencode_pages(pixel_pages)
-        return pages
+        return await rasterize_pdf_safe(tmp)
     finally:
         tmp.unlink(missing_ok=True)
 
@@ -457,19 +417,12 @@ async def _process_pdf_text(raw: bytes) -> list[str] | None:
     Returns list of page strings, or None if the document appears scanned.
     Raises ConversionError on processing failure.
     """
-    loop = asyncio.get_running_loop()
     fd, _tmp = tempfile.mkstemp(suffix=".pdf")
     os.close(fd)
     tmp = Path(_tmp)
     try:
         tmp.write_bytes(raw)
-        try:
-            texts = await loop.run_in_executor(None, extract_text_from_pdf, tmp)
-        except ConversionError:
-            raise
-        except Exception as e:
-            raise ConversionError("PyMuPDFError", str(e))
-        return texts  # list[str] or None (scanned)
+        return await extract_text_from_pdf_safe(tmp)
     finally:
         tmp.unlink(missing_ok=True)
 
