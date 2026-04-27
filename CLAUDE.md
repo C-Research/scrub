@@ -32,7 +32,7 @@ SCRUB_RUNTIME=runsc docker compose up
 pip install -e ".[dev]"
 ```
 
-Environment variables: `SCRUB_RUNTIME` (default: `runc`; set to `runsc`/`runsc-kvm` for gVisor), `SCRUB_WORKERS` (default: CPU×2−1), `SCRUB_TIMEOUT` (LibreOffice timeout in seconds, default 60), `SCRUB_MAX_PAGES` (max PDF pages before `FileTooLarge`, default 500), `SCRUB_MAX_PAGE_PIXELS` (max pixels per rasterized page, default 50000000 ≈ 7000×7000).
+Environment variables: `SCRUB_RUNTIME` (default: `runc`; set to `runsc`/`runsc-kvm` for gVisor), `SCRUB_WORKERS` (default: CPU×2−1), `SCRUB_TIMEOUT` (LibreOffice timeout in seconds, default 60), `SCRUB_MAX_PAGES` (max PDF pages before `FileTooLarge`, default 500), `SCRUB_MAX_PAGE_PIXELS` (max pixels per rasterized page, default 50000000 ≈ 7000×7000), `SCRUB_SKIP_ERRORS` (set to `1`/`true`/`yes` to skip files that already have an error manifest in `data/errors/`).
 
 ## Architecture
 

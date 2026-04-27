@@ -31,6 +31,7 @@ def _env_int(name: str, default: int) -> int:
 
 
 _MAX_SIZE = _env_int("SCRUB_MAX_FILE_SIZE", 100) * 1024 * 1024
+_SKIP_ERRORS = os.environ.get("SCRUB_SKIP_ERRORS", "").strip().lower() in ("1", "true", "yes")
 
 # (magic_bytes_prefix, format_string)
 _MAGIC: list[tuple[bytes, str]] = [
@@ -151,6 +152,10 @@ async def process_file(
             pass
     if _already_clean:
         log.skip(rel_str, "already_clean")
+        return "skipped"
+
+    if _SKIP_ERRORS and fs.derive_error_manifest_path(errors_dir, rel_path).exists():
+        log.skip(rel_str, "already_failed")
         return "skipped"
 
     # Pre-flight: size check before reading full file

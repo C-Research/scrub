@@ -121,10 +121,14 @@ async def write_quarantine_manifest(
         await f.write(json.dumps(manifest, indent=2))
 
 
+def derive_error_manifest_path(errors_dir: Path, rel_path: Path) -> Path:
+    return errors_dir / rel_path.parent / _cap_filename(rel_path.name, ".json")
+
+
 async def write_error_manifest(
     errors_dir: Path, rel_path: Path, manifest: dict
 ) -> None:
-    out = errors_dir / rel_path.parent / _cap_filename(rel_path.name, ".json")
+    out = derive_error_manifest_path(errors_dir, rel_path)
     out.parent.mkdir(parents=True, exist_ok=True)
     async with aiofiles.open(out, "w", encoding="utf-8") as f:
         await f.write(json.dumps(manifest, indent=2))
