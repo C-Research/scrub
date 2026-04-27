@@ -77,7 +77,7 @@ In text mode (`SCRUB_OUTPUT_MODE=text`), documents with a text layer produce a s
 - `budget.xlsx` → `budget.xlsx.txt`
 - `photo.png` → `photo.png.page_001.png` (always PNG)
 
-Files with existing clean output are skipped on re-runs — only new or previously unprocessed files are cleaned.
+Files with existing clean output are skipped on re-runs — only new or previously unprocessed files are cleaned. With `SCRUB_SKIP_ERRORS=1`, files that already have an error manifest in `data/errors/` are also skipped.
 
 ### Error manifests
 
@@ -109,6 +109,7 @@ Environment variables (set in shell before running, or edit `docker-compose.yml`
 | `SCRUB_MAX_FILE_SIZE` | `100` | Per-file size limit (MB) |
 | `SCRUB_MAX_ARCHIVE_MEMBERS` | `1000` | Max members extracted per archive |
 | `SCRUB_MAX_ARCHIVE_TOTAL_MB` | `500` | Max total uncompressed size per archive (MB) |
+| `SCRUB_SKIP_ERRORS` | `` | Set to `1`/`true`/`yes` to skip files with an existing error manifest |
 
 ```bash
 SCRUB_RUNTIME=runsc SCRUB_WORKERS=4 SCRUB_TIMEOUT=120 docker compose up
@@ -140,7 +141,7 @@ docker inspect scrub-scrub-1 --format '{{.HostConfig.Runtime}}'
 │                                                   │
 │  cli.py → archive.py (expand .zip/.rar)           │
 │        → pipeline.py (per file)                   │
-│    ├── already-clean check (skip if exists)       │
+│    ├── already-clean / already-failed check (skip if exists)       │
 │    ├── png mode (default)                         │
 │    │     LibreOffice → PDF → PyMuPDF → Pillow     │
 │    │     → clean PNG(s)                           │

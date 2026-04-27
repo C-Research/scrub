@@ -14,6 +14,7 @@ services:
       SCRUB_WORKERS: "" # default: ncpu*2-1
       SCRUB_TIMEOUT: "60"
       SCRUB_MEMORY_LIMIT: "512"
+      SCRUB_SKIP_ERRORS: "" # set to 1 to skip files with an existing error manifest
     volumes:
       # Source: read-only — never modified
       - type: bind
